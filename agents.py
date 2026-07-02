@@ -3,6 +3,7 @@ import json
 import time
 import requests
 import logging
+import re
 from scan_engine import DASTScanEngine
 from pdf_generator import generate_pdf_report
 
@@ -21,16 +22,19 @@ class ReconAgent:
         crawled_urls = engine.crawl_site(max_pages=5) # quick crawl for recon
         
         scan_profile = "Standard Profile"
+        use_ajax = False
         if any("WordPress" in f for f in frameworks):
             scan_profile = "WordPress Focused Profile"
         elif any("React" in f or "Angular" in f or "Vue" in f or "Next.js" in f for f in frameworks):
             scan_profile = "SPA/Ajax Focused Profile"
+            use_ajax = True
             
         scan_config = {
             "target_url": self.target_url,
             "frameworks": frameworks,
             "detected_forms_count": len(engine.forms_found),
             "scan_profile": scan_profile,
+            "use_ajax_spider": use_ajax,
             "pages_to_scan": crawled_urls
         }
         logger.info(f"[Recon Agent] Recon completed. Frameworks: {frameworks}. Profile: {scan_profile}")
@@ -44,8 +48,8 @@ class ScanAgent:
     def run(self):
         logger.info(f"[Scan Agent] Running DAST scan on: {self.scan_config['target_url']}")
         engine = DASTScanEngine(self.scan_config['target_url'])
-        # Run full scan engine (crawl and detect vulnerabilities)
-        scan_results = engine.run_dast_scan()
+        # Pass dynamic spider preference determined by Recon Agent
+        scan_results = engine.run_dast_scan(use_ajax_spider=self.scan_config.get("use_ajax_spider", False))
         logger.info(f"[Scan Agent] Scan completed. Found {len(scan_results['findings'])} total raw findings.")
         return scan_results
 
@@ -70,17 +74,14 @@ class ValidationAgent:
             logger.info("[Validation Agent] No High/Critical findings to validate.")
             return []
 
-        validated_results = []
+        # STRICT RULE: If no API key is provided, we do NOT perform AI validation.
+        # This prevents showing "Analyzed by AI" or fake confidence ratings when AI was not actually used.
+        if not self.api_key:
+            logger.info("[Validation Agent] No API key detected. Skipping AI validation as requested.")
+            return []
 
-        if self.api_key:
-            # Run actual LLM Validation
-            validated_results = self._validate_with_llm(high_crit_findings)
-        else:
-            # Run local heuristic-based smart validation fallback
-            logger.info("[Validation Agent] No API key detected. Running local Smart Fallback Engine...")
-            validated_results = self._validate_with_fallback(high_crit_findings)
-
-        return validated_results
+        # Run actual LLM Validation
+        return self._validate_with_llm(high_crit_findings)
 
     def _validate_with_llm(self, findings):
         url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
@@ -126,7 +127,6 @@ class ValidationAgent:
             if response.status_code == 200:
                 res_data = response.json()
                 text_content = res_data['contents'][0]['parts'][0]['text']
-                # Strip markdown codeblocks if LLM returned them despite prompt
                 text_content = re.sub(r"^```json\s*", "", text_content.strip())
                 text_content = re.sub(r"\s*```$", "", text_content)
                 validated_list = json.loads(text_content)
@@ -137,83 +137,7 @@ class ValidationAgent:
         except Exception as e:
             logger.error(f"[Validation Agent] Exception occurred during Gemini API validation: {e}")
             
-        logger.info("[Validation Agent] Falling back to local smart engine due to API error...")
-        return self._validate_with_fallback(findings)
-
-    def _validate_with_fallback(self, findings):
-        validated_list = []
-        for f in findings:
-            alert = f.get("alert", "").lower()
-            evidence = f.get("evidence", "").lower()
-            
-            is_fp = False
-            confidence = 0.9
-            reasoning = ""
-            solution = f.get("solution", "")
-            
-            if "sql injection" in alert:
-                reasoning = (
-                    "The vulnerability scan detected SQL syntax errors in the server response when query modifiers "
-                    "were supplied. Because database engine error messages leak stack information and prove structural "
-                    "alteration of the query execution path, there is a very high likelihood of SQL Injection. "
-                    "This finding is verified as TRUE POSITIVE."
-                )
-                confidence = 0.95
-                solution = (
-                    "Rewrite SQL queries to use parameterized prepared statements (e.g. using PDO in PHP, PreparedStatement "
-                    "in Java, or ORMs like SQLAlchemy/Django ORM). Never construct SQL command strings by concatenating input."
-                )
-            elif "cross-site scripting" in alert or "xss" in alert:
-                reasoning = (
-                    "The vulnerability crawler identified direct reflection of the test payload <script>alert(1)</script> "
-                    "in the response body. Since the HTML output contains unescaped markup injection, an attacker can execute "
-                    "arbitrary JavaScript code in the browser context of users visiting this URL. Verified as TRUE POSITIVE."
-                )
-                confidence = 0.90
-                solution = (
-                    "Implement context-aware contextual output encoding (e.g. escaping HTML tags, quotes, and backslashes) "
-                    "before rendering user data in pages. Use Content Security Policy (CSP) headers to block unauthorized scripts."
-                )
-            elif "csrf" in alert:
-                reasoning = (
-                    "A state-changing form (utilizing POST method) was discovered lacking an anti-CSRF token wrapper. "
-                    "Without token validation, an external malicious site can issue requests to this action on behalf of "
-                    "an authenticated user. Verified as TRUE POSITIVE."
-                )
-                confidence = 0.85
-                solution = (
-                    "Implement a cryptographically secure anti-CSRF token wrapper for all state-changing operations. "
-                    "Use framework-level protections (e.g. Laravel CSRF middleware, Django CsrfViewMiddleware, or ASP.NET AntiForgeryToken)."
-                )
-            elif "false positive" in alert or "rce" in alert:
-                # Flag the remote code execution as a likely False Positive to demonstrate agent capabilities
-                is_fp = True
-                confidence = 0.35
-                reasoning = (
-                    "The scan reported Remote Code Execution based strictly on response time delay (sleep payload). "
-                    "However, verification shows that the network response times are highly variable due to server load "
-                    "and routing latency. No further system interaction or output validation confirmed code execution. "
-                    "Likelihood of exploit is extremely low; marked as a PROBABLE FALSE POSITIVE."
-                )
-                solution = "Verify if command invocation libraries are used in the backend. If not, this is a verified false positive."
-            else:
-                reasoning = (
-                    "Automated analysis indicates that the parameters on this page accept input directly without standard "
-                    "filtering. While a theoretical vulnerability exists, proof of exploit is minimal. Review is advised."
-                )
-                confidence = 0.70
-
-            validated_list.append({
-                "id": f.get("id"),
-                "is_false_positive": is_fp,
-                "confidence": confidence,
-                "reasoning": reasoning,
-                "solution": solution,
-                "is_duplicate": False,
-                "duplicate_of_id": None
-            })
-            
-        return validated_list
+        return []
 
 
 class ReportAgent:
@@ -226,10 +150,10 @@ class ReportAgent:
     def run(self):
         logger.info("[Report Agent] Generating reports...")
         
-        # Create map of validated findings by ID
+        # Create map of validated findings by ID (empty if AI wasn't used)
         val_map = {vf["id"]: vf for vf in self.validated_findings}
+        ai_used = len(self.validated_findings) > 0
         
-        # Process and enrich findings
         enriched_findings = []
         stats = {
             "critical": 0,
@@ -251,9 +175,8 @@ class ReportAgent:
                 rf["is_false_positive"] = v_data["is_false_positive"]
                 rf["ai_confidence"] = v_data["confidence"]
                 rf["ai_reasoning"] = v_data["reasoning"]
-                rf["solution"] = v_data["solution"]  # updated/better solution from agent
+                rf["solution"] = v_data["solution"]
                 
-                # Count stats
                 if severity == "critical":
                     stats["critical"] += 1
                     if not v_data["is_false_positive"]:
@@ -263,8 +186,14 @@ class ReportAgent:
                     if not v_data["is_false_positive"]:
                         stats["high_validated"] += 1
             else:
-                # Medium/Low/Info findings
-                if severity == "medium":
+                # No AI data
+                if severity == "critical":
+                    stats["critical"] += 1
+                    stats["critical_validated"] += 1 # assume true positive if not AI checked
+                elif severity == "high":
+                    stats["high"] += 1
+                    stats["high_validated"] += 1 # assume true positive if not AI checked
+                elif severity == "medium":
                     stats["medium"] += 1
                 elif severity == "low":
                     stats["low"] += 1
@@ -274,11 +203,6 @@ class ReportAgent:
             enriched_findings.append(rf)
 
         # Calculate Risk Score: (0-100 scale)
-        # Critical True Positive: 25 pts each
-        # High True Positive: 15 pts each
-        # Medium: 7 pts each
-        # Low: 2 pts each
-        # Max capped at 100
         score = 0
         for f in enriched_findings:
             severity = str(f.get("risk", "")).lower()
@@ -360,10 +284,10 @@ class ReportAgent:
             "business_impact": business_impact,
             "strategic_recommendations": recs,
             "stats": stats,
-            "findings": enriched_findings
+            "findings": enriched_findings,
+            "ai_used": ai_used
         }
 
-        # Save report JSONs
         with open("executive_report.json", "w") as f:
             json.dump(report_data, f, indent=4)
         

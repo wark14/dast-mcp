@@ -245,23 +245,25 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
 
     # ==================== PAGE 2: EXEC SUMMARY & STATS ====================
     story.append(Paragraph("Executive Summary", h1_style))
-    exec_summary_text = report_data.get("executive_summary", "This report contains security assessment results compiled by the AI DAST orchestration agent. High and Critical vulnerabilities have been verified using AI to minimize false positives.")
+    exec_summary_text = report_data.get("executive_summary", "")
     story.append(Paragraph(exec_summary_text, body_style))
     story.append(Spacer(1, 15))
 
     # Stats Table
     stats = report_data.get("stats", {})
+    ai_used = report_data.get("ai_used", False)
+    
     stats_data = [
         [
             Paragraph("<b>Severity</b>", meta_label_style), 
             Paragraph("<b>Count</b>", meta_label_style), 
-            Paragraph("<b>AI Validated</b>", meta_label_style)
+            Paragraph("<b>AI Status</b>" if ai_used else "<b>Scan Status</b>", meta_label_style)
         ],
-        [Paragraph("Critical", bold_body_style), Paragraph(str(stats.get("critical", 0)), body_style), Paragraph(str(stats.get("critical_validated", 0)), body_style)],
-        [Paragraph("High", bold_body_style), Paragraph(str(stats.get("high", 0)), body_style), Paragraph(str(stats.get("high_validated", 0)), body_style)],
-        [Paragraph("Medium", bold_body_style), Paragraph(str(stats.get("medium", 0)), body_style), Paragraph("Direct/ZAP", body_style)],
-        [Paragraph("Low", bold_body_style), Paragraph(str(stats.get("low", 0)), body_style), Paragraph("Direct/ZAP", body_style)],
-        [Paragraph("Informational", bold_body_style), Paragraph(str(stats.get("informational", 0)), body_style), Paragraph("Direct/ZAP", body_style)]
+        [Paragraph("Critical", bold_body_style), Paragraph(str(stats.get("critical", 0)), body_style), Paragraph(str(stats.get("critical_validated", 0)) + " Validated" if ai_used else "Active", body_style)],
+        [Paragraph("High", bold_body_style), Paragraph(str(stats.get("high", 0)), body_style), Paragraph(str(stats.get("high_validated", 0)) + " Validated" if ai_used else "Active", body_style)],
+        [Paragraph("Medium", bold_body_style), Paragraph(str(stats.get("medium", 0)), body_style), Paragraph("Direct Scan alert", body_style)],
+        [Paragraph("Low", bold_body_style), Paragraph(str(stats.get("low", 0)), body_style), Paragraph("Direct Scan alert", body_style)],
+        [Paragraph("Informational", bold_body_style), Paragraph(str(stats.get("informational", 0)), body_style), Paragraph("Direct Scan alert", body_style)]
     ]
     
     stats_table = Table(stats_data, colWidths=[150, 150, 204])
@@ -278,18 +280,12 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
 
     if is_executive:
         story.append(Paragraph("Business & Operational Impact", h2_style))
-        business_impact = report_data.get("business_impact", "Security vulnerabilities expose client data, core applications, and service continuity. Unaddressed issues can result in financial loss, regulatory fines, and reputational damage. Remediation of identified items should be prioritized immediately based on the provided schedule.")
+        business_impact = report_data.get("business_impact", "")
         story.append(Paragraph(business_impact, body_style))
         story.append(Spacer(1, 15))
 
         story.append(Paragraph("Strategic Recommendations", h2_style))
         recs = report_data.get("strategic_recommendations", [])
-        if not recs:
-            recs = [
-                "Remediate Critical SQL Injection vulnerability to prevent database compromise.",
-                "Ensure all form interactions enforce robust CSRF protection mechanisms.",
-                "Implement solid HTTP Security headers across all application endpoints."
-            ]
         for rec in recs:
             story.append(Paragraph(f"• {rec}", bullet_style))
             
@@ -310,13 +306,12 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
     findings = report_data.get("findings", [])
     
     if is_executive:
-        # Executive report only displays High/Critical validated findings
-        display_findings = [f for f in findings if str(f.get("risk", "")).lower() in ["critical", "high"]]
-        story.append(Paragraph("Validated High & Critical Vulnerabilities", h1_style))
+        # Executive report only displays active High/Critical validated findings
+        display_findings = [f for f in findings if str(f.get("risk", "")).lower() in ["critical", "high"] and not f.get("is_false_positive", False)]
+        story.append(Paragraph("High & Critical Vulnerabilities Summary", h1_style))
         if not display_findings:
-            story.append(Paragraph("No High or Critical vulnerabilities were identified during this scan.", body_style))
+            story.append(Paragraph("No High or Critical vulnerabilities are currently verified as active.", body_style))
     else:
-        # Technical report displays everything, including validation details for High/Critical
         display_findings = findings
         story.append(Paragraph("Detailed Security Findings List", h1_style))
 
@@ -349,17 +344,43 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
         if finding.get("evidence"):
             detail_rows.append([Paragraph("<b>Evidence:</b>", meta_label_style), Paragraph(f"<font face='Courier' size='8'>{finding.get('evidence', '')}</font>", meta_val_style)])
 
-        # AI Enrichment fields
-        if "ai_confidence" in finding:
+        # Request / Response output details for Technical Report only
+        if not is_executive:
+            if finding.get("request_header"):
+                req_text = f"<b>HEADERS:</b><br/>{finding.get('request_header').replace('\n', '<br/>')}"
+                if finding.get("request_body"):
+                    req_text += f"<br/><br/><b>BODY:</b><br/>{finding.get('request_body')}"
+                detail_rows.append([
+                    Paragraph("<b>HTTP Request:</b>", meta_label_style), 
+                    Paragraph(f"<font face='Courier' size='7'>{req_text}</font>", meta_val_style)
+                ])
+
+            if finding.get("response_header"):
+                res_text = f"<b>HEADERS:</b><br/>{finding.get('response_header').replace('\n', '<br/>')}"
+                if finding.get("response_body"):
+                    res_body_preview = finding.get('response_body')[:1500] + ("..." if len(finding.get('response_body')) > 1500 else "")
+                    # Escape HTML tags inside request/response strings to prevent PDF text rendering breaks
+                    res_body_preview = res_body_preview.replace('<', '&lt;').replace('>', '&gt;')
+                    res_text += f"<br/><br/><b>BODY PREVIEW:</b><br/>{res_body_preview}"
+                detail_rows.append([
+                    Paragraph("<b>HTTP Response:</b>", meta_label_style), 
+                    Paragraph(f"<font face='Courier' size='7'>{res_text}</font>", meta_val_style)
+                ])
+
+        # AI validation sections (strictly conditional on ai_used)
+        if ai_used and "ai_confidence" in finding:
             conf_color = "#38A169" if float(finding.get("ai_confidence", 0.0)) >= 0.7 else "#DD6B20"
             conf_str = f"<font color='{conf_color}'><b>{int(finding.get('ai_confidence', 0.0)*100)}%</b></font>"
-            detail_rows.append([Paragraph("<b>AI Confidence:</b>", meta_label_style), Paragraph(conf_str, meta_val_style)])
+            if finding.get("is_false_positive"):
+                conf_str += " (Probable False Positive)"
+            else:
+                conf_str += " (Verified True Positive)"
+            detail_rows.append([Paragraph("<b>AI Verification:</b>", meta_label_style), Paragraph(conf_str, meta_val_style)])
             
-        if "ai_reasoning" in finding:
-            detail_rows.append([Paragraph("<b>AI Analysis:</b>", meta_label_style), Paragraph(finding.get("ai_reasoning", ""), meta_val_style)])
+            if finding.get("ai_reasoning"):
+                detail_rows.append([Paragraph("<b>AI Analysis:</b>", meta_label_style), Paragraph(finding.get("ai_reasoning", ""), meta_val_style)])
 
         if not is_executive:
-            # Show CWE / WASC metadata in Technical Report
             meta_links = []
             if finding.get("cweid"):
                 meta_links.append(f"CWE-{finding.get('cweid')}")
@@ -380,12 +401,10 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
             ('LINEBELOW', (0,0), (-1,-2), 0.5, colors.HexColor("#E2E8F0")),
         ]))
 
-        # Wrap in KeepTogether to avoid awkward page breaks within a finding
         story.append(KeepTogether([
             header_table,
             details_table,
             Spacer(1, 15)
         ]))
 
-    # Build the document
     doc.build(story, canvasmaker=NumberedCanvas)

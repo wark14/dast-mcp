@@ -59,10 +59,16 @@ def run_dast_pipeline_thread(target_url, api_key):
         
         # Step 3: Validation Agent
         scan_state["progress"] = 60
-        add_log("Invoking Validation Agent (Filtering High & Critical findings for AI verification)...")
+        if api_key:
+            add_log("Invoking Validation Agent (Filtering High & Critical findings for AI verification)...")
+        else:
+            add_log("Invoking Validation Agent (No API Key specified - skipping AI check)...")
         validator = ValidationAgent(scan_results["findings"], api_key=api_key)
         validated_findings = validator.run()
-        add_log(f"Validation Agent completed. AI verified {len(validated_findings)} High/Critical findings.")
+        if api_key:
+            add_log(f"Validation Agent completed. AI verified {len(validated_findings)} High/Critical findings.")
+        else:
+            add_log("Validation Agent completed. Dynamic AI verification skipped.")
         
         # Step 4: Report Agent
         scan_state["progress"] = 80
@@ -143,7 +149,6 @@ DASHBOARD_HTML = """
             position: relative;
         }
 
-        /* Subtle glowing background decorations */
         body::before {
             content: '';
             position: absolute;
@@ -237,7 +242,6 @@ DASHBOARD_HTML = """
             }
         }
 
-        /* Sidebar Panel (Configuration) */
         .sidebar {
             display: flex;
             flex-direction: column;
@@ -321,17 +325,12 @@ DASHBOARD_HTML = """
             filter: brightness(1.1);
         }
 
-        .btn:active:not(:disabled) {
-            transform: translateY(0);
-        }
-
         .btn:disabled {
             opacity: 0.6;
             cursor: not-allowed;
             box-shadow: none;
         }
 
-        /* Live Terminal Logs */
         .terminal-container {
             display: flex;
             flex-direction: column;
@@ -378,7 +377,6 @@ DASHBOARD_HTML = """
             word-break: break-all;
         }
 
-        /* Scan Progress Ring */
         .progress-bar-wrapper {
             margin-top: 1.5rem;
             display: none;
@@ -407,14 +405,12 @@ DASHBOARD_HTML = """
             box-shadow: 0 0 10px var(--primary);
         }
 
-        /* Results Panel (Main Content) */
         .dashboard-content {
             display: flex;
             flex-direction: column;
             gap: 1.5rem;
         }
 
-        /* Stats Grid */
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
@@ -476,7 +472,6 @@ DASHBOARD_HTML = """
             margin-top: 0.15rem;
         }
 
-        /* Summary Banner & Score */
         .summary-banner {
             display: grid;
             grid-template-columns: 1fr 220px;
@@ -573,7 +568,6 @@ DASHBOARD_HTML = """
             font-weight: 600;
         }
 
-        /* Framework Badges */
         .framework-wrapper {
             display: flex;
             flex-wrap: wrap;
@@ -590,7 +584,6 @@ DASHBOARD_HTML = """
             border: 1px solid rgba(255, 255, 255, 0.05);
         }
 
-        /* Tabs and Tables */
         .tabs-header {
             display: flex;
             border-bottom: 1px solid var(--bg-border);
@@ -628,7 +621,6 @@ DASHBOARD_HTML = """
             background-color: var(--primary-light);
         }
 
-        /* Findings List */
         .findings-list {
             display: flex;
             flex-direction: column;
@@ -642,10 +634,6 @@ DASHBOARD_HTML = """
             border-radius: 0.75rem;
             overflow: hidden;
             transition: all 0.2s;
-        }
-
-        .finding-item:hover {
-            border-color: rgba(255, 255, 255, 0.1);
         }
 
         .finding-top {
@@ -778,7 +766,6 @@ DASHBOARD_HTML = """
             font-weight: 600;
         }
 
-        /* Reports Download Block */
         .reports-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -822,7 +809,6 @@ DASHBOARD_HTML = """
             box-shadow: 0 4px 12px rgba(6, 182, 212, 0.2);
         }
 
-        /* Empty state styling */
         .empty-state {
             text-align: center;
             padding: 4rem 2rem;
@@ -838,7 +824,6 @@ DASHBOARD_HTML = """
             opacity: 0.3;
         }
 
-        /* Loader Animation */
         .spinner {
             width: 1.25rem;
             height: 1.25rem;
@@ -850,6 +835,34 @@ DASHBOARD_HTML = """
 
         @keyframes spin {
             to { transform: rotate(360deg); }
+        }
+
+        .payload-collapsible {
+            margin-top: 0.75rem;
+            border: 1px solid var(--bg-border);
+            border-radius: 0.5rem;
+            overflow: hidden;
+        }
+
+        .payload-header {
+            background-color: rgba(30, 41, 59, 0.5);
+            padding: 0.5rem 1rem;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            user-select: none;
+        }
+
+        .payload-body {
+            display: none;
+            padding: 0.75rem;
+            background-color: #05070C;
+        }
+
+        .payload-collapsible.open .payload-body {
+            display: block;
         }
     </style>
 </head>
@@ -876,10 +889,10 @@ DASHBOARD_HTML = """
                     <input class="form-input" type="url" id="target-url" placeholder="https://example.com" value="https://example.com">
                 </div>
                 <div class="form-group">
-                    <label class="form-label" for="api-key">Gemini API Key (Optional)</label>
-                    <input class="form-input" type="password" id="api-key" placeholder="Enter API Key for real LLM checks">
+                    <label class="form-label" for="api-key">Gemini API Key (Required for AI Check)</label>
+                    <input class="form-input" type="password" id="api-key" placeholder="Enter API Key">
                     <p style="font-size: 0.65rem; color: var(--text-muted); margin-top: 0.25rem;">
-                        If empty, a realistic expert-guided simulation engine will validate the findings locally.
+                        Provide a Gemini API Key to enable the Validation Agent. If empty, the scanning engine will report ZAP findings directly without mock AI status badges.
                     </p>
                 </div>
                 <button class="btn" id="scan-btn" onclick="startScan()">
@@ -914,7 +927,6 @@ DASHBOARD_HTML = """
 
         <!-- MAIN DASHBOARD CONTENT -->
         <div class="dashboard-content">
-            <!-- EMPTY STATE (Before scanning) -->
             <div class="card" id="empty-dashboard">
                 <div class="empty-state">
                     <div class="empty-icon">🔍</div>
@@ -923,7 +935,6 @@ DASHBOARD_HTML = """
                 </div>
             </div>
 
-            <!-- SCAN COMPLETED/RUNNING CONTENT -->
             <div id="results-dashboard" style="display: none; flex-direction: column; gap: 1.5rem;">
                 
                 <!-- SUMMARY BANNER -->
@@ -936,7 +947,6 @@ DASHBOARD_HTML = """
                                 Scan summary description will be generated and placed here by the Report Agent.
                             </p>
                             <div class="framework-wrapper" id="frameworks-container">
-                                <!-- Framework badges loaded dynamically -->
                             </div>
                         </div>
 
@@ -1008,12 +1018,11 @@ DASHBOARD_HTML = """
                 <!-- DETAILED FINDINGS TABS -->
                 <div class="card">
                     <div class="tabs-header">
-                        <button class="tab-btn active" id="tab-validated" onclick="switchTab('validated')">AI Validated Findings (High/Critical)</button>
+                        <button class="tab-btn active" id="tab-validated" onclick="switchTab('validated')">High & Critical Alerts</button>
                         <button class="tab-btn" id="tab-all" onclick="switchTab('all')">All Raw Findings</button>
                     </div>
 
                     <div class="findings-list" id="findings-container">
-                        <!-- Loaded dynamically -->
                     </div>
                 </div>
 
@@ -1035,20 +1044,17 @@ DASHBOARD_HTML = """
                 return;
             }
 
-            // Reset UI for scanning
             document.getElementById('scan-btn').disabled = true;
             document.getElementById('scan-btn').innerHTML = '<div class="spinner"></div> Running Scan...';
             document.getElementById('progress-wrapper').style.display = 'block';
             document.getElementById('log-terminal').innerHTML = '';
             
-            // Show result dashboard structure (empty stats first)
             document.getElementById('empty-dashboard').style.display = 'none';
             document.getElementById('results-dashboard').style.display = 'flex';
             document.getElementById('reports-section').style.display = 'none';
             document.getElementById('results-target-title').innerText = "Scanning: " + urlInput;
             document.getElementById('risk-summary').innerText = "The Orchestrator is running. Recon and vulnerability checks are active...";
             
-            // Post payload
             fetch('/scan', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1056,7 +1062,6 @@ DASHBOARD_HTML = """
             })
             .then(res => res.json())
             .then(data => {
-                // Begin polling status
                 if (pollInterval) clearInterval(pollInterval);
                 pollInterval = setInterval(pollScanStatus, 1000);
             })
@@ -1070,17 +1075,14 @@ DASHBOARD_HTML = """
             fetch('/status')
             .then(res => res.json())
             .then(state => {
-                // Update terminal logs
                 const terminal = document.getElementById('log-terminal');
                 const wasScrolledDown = terminal.scrollHeight - terminal.clientHeight <= terminal.scrollTop + 10;
                 
                 terminal.innerHTML = state.logs.map(log => `<div class="terminal-line">${log}</div>`).join('');
-                
                 if (wasScrolledDown) {
                     terminal.scrollTop = terminal.scrollHeight;
                 }
 
-                // Update progress bar
                 document.getElementById('progress-pct').innerText = state.progress + "%";
                 document.getElementById('progress-fill').style.width = state.progress + "%";
                 
@@ -1116,46 +1118,37 @@ DASHBOARD_HTML = """
         function renderScanResults() {
             if (!scanResultsData) return;
 
-            // Target Title & Summary
             document.getElementById('results-target-title').innerText = "Target: " + scanResultsData.target_url;
             document.getElementById('risk-summary').innerText = scanResultsData.executive_summary;
 
-            // Risk Score circle animation
             const score = scanResultsData.risk_score;
             document.getElementById('risk-score-num').innerText = score;
             const circle = document.getElementById('score-circle');
-            
-            // SVG perimeter is 2 * pi * r = 2 * 3.14159 * 54 = 339
             const offset = 339 - (score / 100) * 339;
             circle.style.strokeDashoffset = offset;
             
-            // Risk score color override
             let circleColor = "var(--low)";
             if (score >= 70) circleColor = "var(--critical)";
             else if (score >= 30) circleColor = "var(--high)";
             circle.style.stroke = circleColor;
 
-            // Risk Badge
             const badge = document.getElementById('risk-badge');
             badge.innerText = scanResultsData.risk_desc;
             badge.className = "risk-badge " + scanResultsData.risk_desc.split(' ')[0].toLowerCase();
 
-            // Stats
             document.getElementById('stat-crit').innerText = scanResultsData.stats.critical;
-            document.getElementById('stat-crit-val').innerText = scanResultsData.stats.critical_validated + " Validated";
+            document.getElementById('stat-crit-val').innerText = (scanResultsData.ai_used ? scanResultsData.stats.critical_validated : scanResultsData.stats.critical) + (scanResultsData.ai_used ? " Validated" : " Active");
             
             document.getElementById('stat-high').innerText = scanResultsData.stats.high;
-            document.getElementById('stat-high-val').innerText = scanResultsData.stats.high_validated + " Validated";
+            document.getElementById('stat-high-val').innerText = (scanResultsData.ai_used ? scanResultsData.stats.high_validated : scanResultsData.stats.high) + (scanResultsData.ai_used ? " Validated" : " Active");
             
             document.getElementById('stat-med').innerText = scanResultsData.stats.medium;
             document.getElementById('stat-low').innerText = scanResultsData.stats.low;
             document.getElementById('stat-info').innerText = scanResultsData.stats.informational;
 
-            // Framework list
             const fwContainer = document.getElementById('frameworks-container');
             fwContainer.innerHTML = scanResultsData.frameworks.map(fw => `<span class="framework-badge">${fw}</span>`).join('');
 
-            // Load findings tab
             renderFindingsList();
         }
 
@@ -1185,20 +1178,53 @@ DASHBOARD_HTML = """
             }
 
             list.forEach(finding => {
-                const isAIEnriched = 'ai_confidence' in finding;
+                const isAIEnriched = scanResultsData.ai_used && ('ai_confidence' in finding);
                 const fpText = finding.is_false_positive ? 'Probable False Positive' : 'Verified True Positive';
                 
                 const item = document.createElement('div');
                 item.className = 'finding-item';
                 
-                const isFpClass = finding.is_false_positive ? 'info' : finding.risk.toLowerCase();
-                const sevName = finding.is_false_positive ? 'FP' : finding.risk;
+                const isFpClass = (scanResultsData.ai_used && finding.is_false_positive) ? 'info' : finding.risk.toLowerCase();
+                const sevName = (scanResultsData.ai_used && finding.is_false_positive) ? 'FP' : finding.risk;
                 
                 let aiBadgeHTML = '';
                 if (isAIEnriched) {
                     aiBadgeHTML = `
                         <div class="ai-badge">
                             ✨ AI Checked
+                        </div>
+                    `;
+                }
+
+                let httpAuditsHTML = '';
+                if (finding.request_header || finding.response_header) {
+                    httpAuditsHTML = `
+                        <div class="detail-row">
+                            <div class="detail-label">HTTP Transaction Audit Payloads</div>
+                            
+                            ${finding.request_header ? `
+                            <div class="payload-collapsible">
+                                <div class="payload-header" onclick="this.parentElement.classList.toggle('open')">
+                                    <span>🌐 HTTP Request Headers & Body</span>
+                                    <span>▼</span>
+                                </div>
+                                <div class="payload-body">
+                                    <div class="code-box">${finding.request_header}\n\n${finding.request_body || ''}</div>
+                                </div>
+                            </div>
+                            ` : ''}
+
+                            ${finding.response_header ? `
+                            <div class="payload-collapsible">
+                                <div class="payload-header" onclick="this.parentElement.classList.toggle('open')">
+                                    <span>📥 HTTP Response Headers & Preview</span>
+                                    <span>▼</span>
+                                </div>
+                                <div class="payload-body">
+                                    <div class="code-box">${finding.response_header}\n\n${finding.response_body || ''}</div>
+                                </div>
+                            </div>
+                            ` : ''}
                         </div>
                     `;
                 }
@@ -1225,7 +1251,7 @@ DASHBOARD_HTML = """
 
                         ${finding.evidence ? `
                         <div class="detail-row">
-                            <div class="detail-label">HTTP Scan Evidence</div>
+                            <div class="detail-label">Scan Evidence</div>
                             <div class="code-box">${finding.evidence}</div>
                         </div>
                         ` : ''}
@@ -1234,6 +1260,8 @@ DASHBOARD_HTML = """
                             <div class="detail-label">Remediation Action</div>
                             <div class="detail-val">${finding.solution}</div>
                         </div>
+
+                        ${httpAuditsHTML}
 
                         ${isAIEnriched ? `
                         <div class="ai-analysis-block">
@@ -1266,7 +1294,6 @@ def index():
 def scan():
     global scan_state
     
-    # Check if a scan is already running
     with scan_lock:
         if scan_state["status"] == "running":
             return jsonify({"error": "A scan is already active."}), 400
@@ -1278,7 +1305,6 @@ def scan():
     if not url.startswith("http://") and not url.startswith("https://"):
         url = "https://" + url
 
-    # Trigger async thread execution
     t = threading.Thread(target=run_dast_pipeline_thread, args=(url, api_key))
     t.daemon = True
     t.start()
@@ -1288,7 +1314,6 @@ def scan():
 @app.route("/status")
 def status():
     with scan_lock:
-        # Avoid deep copies, return current state snapshot
         return jsonify({
             "status": scan_state["status"],
             "progress": scan_state["progress"],
