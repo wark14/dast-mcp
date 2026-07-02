@@ -204,6 +204,36 @@ class TestDASTPipeline(unittest.TestCase):
             if os.path.exists(path):
                 os.remove(path)
 
+    def test_pdf_handles_oversized_http_content(self):
+        """
+        A finding whose HTTP message is taller than a page must not crash PDF generation.
+        Regression for the ReportLab LayoutError raised when such content was rendered inside
+        a (non-splittable) table row.
+        """
+        print("\n[TEST] Verifying PDF survives oversized HTTP payloads...")
+        from pdf_generator import generate_pdf_report
+
+        huge_headers = "\n".join(f"X-H-{i}: {'a' * 40}" for i in range(150))
+        huge_body = "<html>" + ("<div>line</div>\n" * 400) + "</html>"
+        finding = {
+            "id": "big", "alert": "Oversized HTTP Finding", "risk": "Medium", "confidence": "High",
+            "url": "http://t/", "parameter": "", "description": "d" * 300, "solution": "s",
+            "evidence": "e" * 6000, "wascid": "15", "cweid": "693",
+            "request_header": huge_headers, "request_body": "x" * 4000,
+            "response_header": huge_headers, "response_body": huge_body, "other": "",
+        }
+        report = ReportAgent("http://t/", SAMPLE_SCAN_CONFIG, [finding], []).run()
+
+        out = "regression_tech.pdf"
+        try:
+            generate_pdf_report(report, out, is_executive=False)  # must not raise
+            self.assertTrue(os.path.exists(out))
+        finally:
+            for path in [out, "executive_report.json", "technical_va_report.json",
+                         "findings_severity_chart.png"]:
+                if os.path.exists(path):
+                    os.remove(path)
+
     def test_active_scan_toggle_flows_to_report(self):
         """The active_scan choice on the scan config propagates into the report."""
         print("\n[TEST] Verifying active_scan toggle propagates...")
@@ -220,8 +250,10 @@ class TestDASTPipeline(unittest.TestCase):
         """End-to-end scan against a real ZAP daemon (only runs when ZAP is already up)."""
         print("\n[TEST] Running live ZAP scan integration test...")
         config = ReconAgent(self.target_url).run()
+        config["active_scan"] = False  # passive-only: never send attack payloads to a domain we don't own
         results = ScanAgent(config).run()
         self.assertIn("scan_id", results)
+        self.assertFalse(results["active_scan"])
         self.assertIn("findings", results)
         if os.path.exists(f"scan_results_{results['scan_id']}.json"):
             os.remove(f"scan_results_{results['scan_id']}.json")
