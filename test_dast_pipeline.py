@@ -204,6 +204,40 @@ class TestDASTPipeline(unittest.TestCase):
             if os.path.exists(path):
                 os.remove(path)
 
+    def _score(self, findings):
+        report = ReportAgent(self.target_url, dict(SAMPLE_SCAN_CONFIG), findings, []).run()
+        for p in ["executive_report.json", "technical_va_report.json"]:
+            if os.path.exists(p):
+                os.remove(p)
+        return report["risk_score"], report["risk_desc"]
+
+    @staticmethod
+    def _sev_findings(risk, n):
+        return [{"id": f"{risk}{i}", "risk": risk, "alert": "x", "url": "u",
+                 "description": "d", "solution": "s", "evidence": ""} for i in range(n)]
+
+    def test_risk_score_anchored_to_worst_severity(self):
+        """Many low-severity findings must not inflate the profile to CRITICAL."""
+        print("\n[TEST] Verifying severity-anchored risk scoring...")
+        # The reported bug: 15 Medium + 11 Low used to score 100 / CRITICAL.
+        score, desc = self._score(self._sev_findings("Medium", 15) + self._sev_findings("Low", 11))
+        self.assertLess(score, 70)
+        self.assertEqual(desc, "MEDIUM RISK PROFILE")
+
+        # Severity anchoring: a single Critical outranks any volume of Medium/Low.
+        c_score, c_desc = self._score(self._sev_findings("Critical", 1))
+        self.assertGreaterEqual(c_score, 80)
+        self.assertEqual(c_desc, "CRITICAL RISK PROFILE")
+
+        # A High (no Critical) is a HIGH profile, not CRITICAL.
+        h_score, h_desc = self._score(self._sev_findings("High", 1))
+        self.assertEqual(h_desc, "HIGH RISK PROFILE")
+        self.assertLess(h_score, 80)
+
+        # Only Low severity → LOW profile.
+        _, l_desc = self._score(self._sev_findings("Low", 5))
+        self.assertEqual(l_desc, "LOW RISK PROFILE")
+
     def test_active_scan_toggle_flows_to_report(self):
         """The active_scan choice on the scan config propagates into the report."""
         print("\n[TEST] Verifying active_scan toggle propagates...")

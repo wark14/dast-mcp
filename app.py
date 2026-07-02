@@ -1123,6 +1123,19 @@ DASHBOARD_HTML = """
         let scanResultsData = null;
         let pollInterval = null;
 
+        // Escape scan-derived content before injecting into innerHTML. Findings contain raw
+        // HTTP responses (e.g. "<html>...") and other attacker-influenced strings; injecting
+        // them unescaped corrupts the DOM and breaks the page layout (and is an XSS vector).
+        function escapeHtml(s) {
+            if (s === null || s === undefined) return '';
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         function startScan() {
             const urlInput = document.getElementById('target-url').value;
             const apiKeyInput = document.getElementById('api-key').value;
@@ -1168,7 +1181,7 @@ DASHBOARD_HTML = """
                 const terminal = document.getElementById('log-terminal');
                 const wasScrolledDown = terminal.scrollHeight - terminal.clientHeight <= terminal.scrollTop + 10;
                 
-                terminal.innerHTML = state.logs.map(log => `<div class="terminal-line">${log}</div>`).join('');
+                terminal.innerHTML = state.logs.map(log => `<div class="terminal-line">${escapeHtml(log)}</div>`).join('');
                 if (wasScrolledDown) {
                     terminal.scrollTop = terminal.scrollHeight;
                 }
@@ -1218,8 +1231,9 @@ DASHBOARD_HTML = """
             circle.style.strokeDashoffset = offset;
             
             let circleColor = "var(--low)";
-            if (score >= 70) circleColor = "var(--critical)";
-            else if (score >= 30) circleColor = "var(--high)";
+            if (score >= 80) circleColor = "var(--critical)";
+            else if (score >= 50) circleColor = "var(--high)";
+            else if (score >= 25) circleColor = "var(--medium)";
             circle.style.stroke = circleColor;
 
             const badge = document.getElementById('risk-badge');
@@ -1237,7 +1251,7 @@ DASHBOARD_HTML = """
             document.getElementById('stat-info').innerText = scanResultsData.stats.informational;
 
             const fwContainer = document.getElementById('frameworks-container');
-            fwContainer.innerHTML = scanResultsData.frameworks.map(fw => `<span class="framework-badge">${fw}</span>`).join('');
+            fwContainer.innerHTML = scanResultsData.frameworks.map(fw => `<span class="framework-badge">${escapeHtml(fw)}</span>`).join('');
 
             renderReconResults();
             renderFindingsList();
@@ -1263,7 +1277,7 @@ DASHBOARD_HTML = """
             const fws = scanResultsData.frameworks || [];
             document.getElementById('recon-tech').innerText = fws.length;
             document.getElementById('recon-frameworks').innerHTML = fws.length
-                ? fws.map(fw => `<span class="framework-badge">${fw}</span>`).join('')
+                ? fws.map(fw => `<span class="framework-badge">${escapeHtml(fw)}</span>`).join('')
                 : '<span style="color:var(--text-muted);">None detected</span>';
 
             const pages = scanResultsData.pages_crawled || [];
@@ -1329,7 +1343,7 @@ DASHBOARD_HTML = """
                                     <span>▼</span>
                                 </div>
                                 <div class="payload-body">
-                                    <div class="code-box">${finding.request_header}\n\n${finding.request_body || ''}</div>
+                                    <div class="code-box">${escapeHtml(finding.request_header)}\n\n${escapeHtml(finding.request_body || '')}</div>
                                 </div>
                             </div>
                             ` : ''}
@@ -1341,7 +1355,7 @@ DASHBOARD_HTML = """
                                     <span>▼</span>
                                 </div>
                                 <div class="payload-body">
-                                    <div class="code-box">${finding.response_header}\n\n${finding.response_body || ''}</div>
+                                    <div class="code-box">${escapeHtml(finding.response_header)}\n\n${escapeHtml(finding.response_body || '')}</div>
                                 </div>
                             </div>
                             ` : ''}
@@ -1352,8 +1366,8 @@ DASHBOARD_HTML = """
                 item.innerHTML = `
                     <div class="finding-top" onclick="this.parentElement.classList.toggle('open')">
                         <div class="finding-meta">
-                            <span class="severity-badge ${isFpClass}">${sevName}</span>
-                            <span class="finding-title">${finding.alert}</span>
+                            <span class="severity-badge ${isFpClass}">${escapeHtml(sevName)}</span>
+                            <span class="finding-title">${escapeHtml(finding.alert)}</span>
                             ${aiBadgeHTML}
                         </div>
                         <div class="finding-arrow">▼</div>
@@ -1361,24 +1375,24 @@ DASHBOARD_HTML = """
                     <div class="finding-bottom">
                         <div class="detail-row">
                             <div class="detail-label">Vulnerable Endpoint / Parameter</div>
-                            <div class="detail-val"><code>${finding.url}</code> ${finding.parameter ? `(Parameter: <code>${finding.parameter}</code>)` : ''}</div>
+                            <div class="detail-val"><code>${escapeHtml(finding.url)}</code> ${finding.parameter ? `(Parameter: <code>${escapeHtml(finding.parameter)}</code>)` : ''}</div>
                         </div>
-                        
+
                         <div class="detail-row">
                             <div class="detail-label">Vulnerability Description</div>
-                            <div class="detail-val">${finding.description}</div>
+                            <div class="detail-val">${escapeHtml(finding.description)}</div>
                         </div>
 
                         ${finding.evidence ? `
                         <div class="detail-row">
                             <div class="detail-label">Scan Evidence</div>
-                            <div class="code-box">${finding.evidence}</div>
+                            <div class="code-box">${escapeHtml(finding.evidence)}</div>
                         </div>
                         ` : ''}
 
                         <div class="detail-row">
                             <div class="detail-label">Remediation Action</div>
-                            <div class="detail-val">${finding.solution}</div>
+                            <div class="detail-val">${escapeHtml(finding.solution)}</div>
                         </div>
 
                         ${httpAuditsHTML}
@@ -1392,7 +1406,7 @@ DASHBOARD_HTML = """
                                 </span>
                             </div>
                             <div class="detail-val" style="font-style: italic; color: #E2E8F0;">
-                                "${finding.ai_reasoning}"
+                                "${escapeHtml(finding.ai_reasoning)}"
                             </div>
                         </div>
                         ` : ''}

@@ -234,74 +234,98 @@ class ReportAgent:
             
             enriched_findings.append(rf)
 
-        # Calculate Risk Score: (0-100 scale)
-        score = 0
-        for f in enriched_findings:
-            severity = str(f.get("risk", "")).lower()
-            is_fp = f.get("is_false_positive", False)
-            if is_fp:
-                continue
-            
-            if severity == "critical":
-                score += 25
-            elif severity == "high":
-                score += 15
-            elif severity == "medium":
-                score += 7
-            elif severity == "low":
-                score += 2
-        
-        risk_score = min(score, 100)
+        # Calculate Risk Score (0-100), anchored to the WORST active severity so that a large
+        # volume of low-severity findings can never inflate the profile to "critical".
+        active = [f for f in enriched_findings if not f.get("is_false_positive", False)]
+        sev_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+        for f in active:
+            sev = str(f.get("risk", "")).lower()
+            if sev in sev_counts:
+                sev_counts[sev] += 1
+        n_crit = sev_counts["critical"]
+        n_high = sev_counts["high"]
+        n_med = sev_counts["medium"]
+        n_low = sev_counts["low"]
 
-        # Generate Executive Summary Text based on results
-        active_criticals = stats["critical_validated"]
-        active_highs = stats["high_validated"]
-        
-        if risk_score >= 70:
-            risk_desc = "CRITICAL RISK PROFILE"
+        # The band (and its base score) is set by the highest severity present; counts only
+        # nudge the score WITHIN the band (capped) so they can't cross into a higher band.
+        if n_crit:
+            base, risk_desc = 80, "CRITICAL RISK PROFILE"
+        elif n_high:
+            base, risk_desc = 55, "HIGH RISK PROFILE"
+        elif n_med:
+            base, risk_desc = 25, "MEDIUM RISK PROFILE"
+        elif n_low:
+            base, risk_desc = 8, "LOW RISK PROFILE"
+        else:
+            base, risk_desc = 0, "LOW RISK PROFILE"
+
+        bonus = min(n_crit * 6 + n_high * 4 + n_med * 1.5 + n_low * 0.5, 19)
+        risk_score = int(min(base + bonus, 100))
+
+        active_criticals = n_crit
+        active_highs = n_high
+
+        # Generate Executive Summary Text based on the risk band.
+        if risk_desc == "CRITICAL RISK PROFILE":
             summary_text = (
-                f"The security assessment of {self.target_url} has revealed a {risk_desc} with a risk score of {risk_score}/100. "
-                f"A total of {active_criticals} Critical and {active_highs} High vulnerabilities have been validated as active. "
-                "Immediate remediation is required to safeguard systems and prevent complete server compromise or data leakage."
+                f"The security assessment of {self.target_url} revealed a CRITICAL risk profile with a risk score of {risk_score}/100. "
+                f"{n_crit} Critical and {n_high} High severity vulnerabilities are active. "
+                "Immediate remediation is required to prevent server compromise or data leakage."
             )
             business_impact = (
                 "The current security posture represents an immediate threat to business operations, client confidentiality, "
-                "and regulatory compliance. Exposure of SQL databases and form controllers could allow attackers to steal "
-                "sensitive records, resulting in financial penalties, reputational damage, and loss of client trust."
+                "and regulatory compliance. Exploitable critical vulnerabilities could allow attackers to steal sensitive "
+                "records, resulting in financial penalties, reputational damage, and loss of client trust."
             )
             recs = [
-                "Implement parameterized SQL queries immediately on all database query points.",
-                "Deploy CSRF protection frameworks across all POST forms to prevent session hijack triggers.",
-                "Restrict details in server response banners to minimize technical leakage to recon tools."
+                "Remediate all Critical findings immediately (e.g. parameterized queries for any injection points).",
+                "Address High severity findings before the next release.",
+                "Deploy anti-CSRF protection and restrict verbose server banners."
             ]
-        elif risk_score >= 30:
-            risk_desc = "MEDIUM RISK PROFILE"
+        elif risk_desc == "HIGH RISK PROFILE":
             summary_text = (
-                f"The security assessment of {self.target_url} has identified a {risk_desc} with a risk score of {risk_score}/100. "
-                f"Although critical vulnerabilities were resolved or flagged as false positives, {active_highs} High severity issues "
-                "and several configuration deficiencies remain. Remediation should be planned in the current sprint cycle."
+                f"The security assessment of {self.target_url} identified a HIGH risk profile with a risk score of {risk_score}/100. "
+                f"{n_high} High severity vulnerabilities are active, alongside {n_med} Medium and {n_low} Low severity issues. "
+                "No Critical vulnerabilities were confirmed, but High findings should be prioritized in the current cycle."
             )
             business_impact = (
-                "A medium risk score indicates that while core code layers are partially secured, supplementary components "
-                "(such as cross-site request validation or security headers) are unconfigured. Attacks could disrupt user actions."
+                "High severity issues can meaningfully weaken the application's security posture and, if chained, may expose "
+                "sensitive functionality. Prompt remediation is recommended to reduce the likelihood of a successful attack."
             )
             recs = [
-                "Deploy anti-CSRF token middleware on Web App controls.",
-                "Ensure X-Frame-Options and Content Security Policy (CSP) headers are active on all public response pages."
+                "Prioritize remediation of all High severity findings this cycle.",
+                "Deploy anti-CSRF token middleware and enforce security headers (CSP, X-Frame-Options).",
+                "Re-scan to confirm fixes and check for regressions."
+            ]
+        elif risk_desc == "MEDIUM RISK PROFILE":
+            summary_text = (
+                f"The security assessment of {self.target_url} identified a MEDIUM risk profile with a risk score of {risk_score}/100. "
+                f"No Critical or High severity vulnerabilities are active. {n_med} Medium and {n_low} Low severity issues — "
+                "largely configuration and hardening gaps — were identified. Plan remediation in an upcoming sprint."
+            )
+            business_impact = (
+                "The core application appears reasonably secured, but supplementary controls (such as security headers or "
+                "cross-site request validation) are missing. These gaps could aid an attacker but are not directly exploitable on their own."
+            )
+            recs = [
+                "Ensure X-Frame-Options and Content Security Policy (CSP) headers are set on all responses.",
+                "Add anti-CSRF tokens to state-changing forms.",
+                "Address remaining Medium findings during routine maintenance."
             ]
         else:
-            risk_desc = "LOW RISK PROFILE"
             summary_text = (
-                f"The security assessment of {self.target_url} indicates a {risk_desc} with a risk score of {risk_score}/100. "
-                "No critical or high-severity vulnerabilities are active on this application. Standard server configuration improvements "
-                "are recommended to achieve industry-best-practice configurations."
+                f"The security assessment of {self.target_url} indicates a LOW risk profile with a risk score of {risk_score}/100. "
+                f"No Critical or High severity vulnerabilities are active. {n_med} Medium and {n_low} Low severity hardening "
+                "recommendations were identified. Standard configuration improvements are advised."
             )
             business_impact = (
-                "The business impact is low. Current security configurations meet basic safety baselines, but security posture "
-                "can be further strengthened by completing recommended security header updates."
+                "The business impact is low. Current security configurations meet basic safety baselines, but the posture "
+                "can be further strengthened by completing the recommended security header and hardening updates."
             )
             recs = [
-                "Add missing HTTP security headers (X-Content-Type-Options, HSTS) to web server configurations."
+                "Add any missing HTTP security headers (X-Content-Type-Options, HSTS, CSP).",
+                "Periodically re-scan to catch regressions as the application changes."
             ]
 
         report_data = {
