@@ -1,5 +1,6 @@
 import os
 import time
+from xml.sax.saxutils import escape as _xml_escape
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether, PageBreak, Image
@@ -103,6 +104,20 @@ def create_severity_chart(stats, output_path="findings_severity_chart.png"):
     plt.savefig(output_path, dpi=150)
     plt.close()
     return output_path
+
+
+def esc(value):
+    """
+    Escape dynamic/untrusted text before it is placed inside a reportlab
+    Paragraph. ZAP alert fields (evidence, description, HTTP req/res) and
+    scraped page content routinely contain real HTML, e.g.
+    <a href="#" class="...">. Reportlab's mini-HTML paragraph parser would
+    otherwise try to interpret that markup and crash on unsupported
+    attributes (class, div, img, ...). Escaping renders it as literal text.
+    """
+    if value is None:
+        return ""
+    return _xml_escape(str(value))
 
 
 def get_severity_color(severity):
@@ -262,9 +277,9 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
     frameworks = ", ".join(report_data.get("frameworks", ["Generic Web App"]))
 
     meta_data = [
-        [Paragraph("Target URL:", meta_label_style), Paragraph(target_url, meta_val_style)],
-        [Paragraph("Scan Date/Time:", meta_label_style), Paragraph(scan_date, meta_val_style)],
-        [Paragraph("Frameworks:", meta_label_style), Paragraph(frameworks, meta_val_style)],
+        [Paragraph("Target URL:", meta_label_style), Paragraph(esc(target_url), meta_val_style)],
+        [Paragraph("Scan Date/Time:", meta_label_style), Paragraph(esc(scan_date), meta_val_style)],
+        [Paragraph("Frameworks:", meta_label_style), Paragraph(esc(frameworks), meta_val_style)],
         [Paragraph("Risk Score:", meta_label_style), Paragraph(f"<b>{risk_score}/100</b>", meta_val_style)],
     ]
     
@@ -284,7 +299,7 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
     # ==================== PAGE 2: EXEC SUMMARY & STATS ====================
     story.append(Paragraph("Executive Summary", h1_style))
     exec_summary_text = report_data.get("executive_summary", "")
-    story.append(Paragraph(exec_summary_text, body_style))
+    story.append(Paragraph(esc(exec_summary_text), body_style))
     story.append(Spacer(1, 15))
 
     # Stats Table
@@ -330,13 +345,13 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
     if is_executive:
         story.append(Paragraph("Business & Operational Impact", h2_style))
         business_impact = report_data.get("business_impact", "")
-        story.append(Paragraph(business_impact, body_style))
+        story.append(Paragraph(esc(business_impact), body_style))
         story.append(Spacer(1, 15))
 
         story.append(Paragraph("Strategic Recommendations", h2_style))
         recs = report_data.get("strategic_recommendations", [])
         for rec in recs:
-            story.append(Paragraph(f"• {rec}", bullet_style))
+            story.append(Paragraph(f"• {esc(rec)}", bullet_style))
             
     else:
         # Technical Report - Detail all pages crawled and forms found
@@ -347,13 +362,14 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
         frameworks_list = report_data.get("frameworks", [])
         story.append(Paragraph("<b>Detected Technologies:</b>", bold_body_style))
         for f in frameworks_list:
-            story.append(Paragraph(f"• {f}", bullet_style))
+            story.append(Paragraph(f"• {esc(f)}", bullet_style))
 
     story.append(PageBreak())
 
     # ==================== PAGE 3+: FINDINGS DETAILS ====================
     findings = report_data.get("findings", [])
     
+    info_findings = []
     if is_executive:
         # Executive report only displays active High/Critical validated findings
         display_findings = [f for f in findings if str(f.get("risk", "")).lower() in ["critical", "high"] and not f.get("is_false_positive", False)]
@@ -361,15 +377,21 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
         if not display_findings:
             story.append(Paragraph("No High or Critical vulnerabilities are currently verified as active.", body_style))
     else:
-        display_findings = findings
+        # Technical report details actionable findings individually, but collapses
+        # the (often huge) volume of Informational passive findings into a summary
+        # table so the PDF stays a manageable size.
+        display_findings = [f for f in findings if "info" not in str(f.get("risk", "")).lower()]
+        info_findings = [f for f in findings if "info" in str(f.get("risk", "")).lower()]
         story.append(Paragraph("Detailed Security Findings List", h1_style))
+        if not display_findings:
+            story.append(Paragraph("No Low or higher severity findings were identified.", body_style))
 
     for idx, finding in enumerate(display_findings, 1):
         severity = finding.get("risk", "Low")
         sev_color = get_severity_color(severity)
         
         # Header block for the finding
-        header_text = f"{idx}. [{severity.upper()}] {finding.get('alert', 'Vulnerability')}"
+        header_text = f"{idx}. [{esc(severity).upper()}] {esc(finding.get('alert', 'Vulnerability'))}"
         title_p = Paragraph(header_text, finding_title_style)
         
         header_table = Table([[title_p]], colWidths=[504])
@@ -382,34 +404,35 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
 
         # Finding details rows
         detail_rows = []
-        detail_rows.append([Paragraph("<b>URL:</b>", meta_label_style), Paragraph(finding.get("url", "N/A"), meta_val_style)])
-        
+        detail_rows.append([Paragraph("<b>URL:</b>", meta_label_style), Paragraph(esc(finding.get("url", "N/A")), meta_val_style)])
+
         if finding.get("parameter"):
-            detail_rows.append([Paragraph("<b>Parameter:</b>", meta_label_style), Paragraph(finding.get("parameter", ""), meta_val_style)])
-            
-        detail_rows.append([Paragraph("<b>Description:</b>", meta_label_style), Paragraph(finding.get("description", ""), meta_val_style)])
-        detail_rows.append([Paragraph("<b>Remediation:</b>", meta_label_style), Paragraph(finding.get("solution", ""), meta_val_style)])
-        
+            detail_rows.append([Paragraph("<b>Parameter:</b>", meta_label_style), Paragraph(esc(finding.get("parameter", "")), meta_val_style)])
+
+        detail_rows.append([Paragraph("<b>Description:</b>", meta_label_style), Paragraph(esc(finding.get("description", "")), meta_val_style)])
+        detail_rows.append([Paragraph("<b>Remediation:</b>", meta_label_style), Paragraph(esc(finding.get("solution", "")), meta_val_style)])
+
         if finding.get("evidence"):
-            detail_rows.append([Paragraph("<b>Evidence:</b>", meta_label_style), Paragraph(f"<font face='Courier' size='8'>{finding.get('evidence', '')}</font>", meta_val_style)])
+            detail_rows.append([Paragraph("<b>Evidence:</b>", meta_label_style), Paragraph(f"<font face='Courier' size='8'>{esc(finding.get('evidence', ''))}</font>", meta_val_style)])
 
         # Request / Response output details for Technical Report only
         if not is_executive:
             if finding.get("request_header"):
-                req_text = f"<b>HEADERS:</b><br/>{finding.get('request_header').replace('\n', '<br/>')}"
+                # Escape first so raw HTTP content is literal, then turn real
+                # newlines into <br/> line breaks that reportlab understands.
+                req_text = f"<b>HEADERS:</b><br/>{esc(finding.get('request_header')).replace(chr(10), '<br/>')}"
                 if finding.get("request_body"):
-                    req_text += f"<br/><br/><b>BODY:</b><br/>{finding.get('request_body')}"
+                    req_text += f"<br/><br/><b>BODY:</b><br/>{esc(finding.get('request_body'))}"
                 detail_rows.append([
-                    Paragraph("<b>HTTP Request:</b>", meta_label_style), 
+                    Paragraph("<b>HTTP Request:</b>", meta_label_style),
                     Paragraph(f"<font face='Courier' size='7'>{req_text}</font>", meta_val_style)
                 ])
 
             if finding.get("response_header"):
-                res_text = f"<b>HEADERS:</b><br/>{finding.get('response_header').replace('\n', '<br/>')}"
+                res_text = f"<b>HEADERS:</b><br/>{esc(finding.get('response_header')).replace(chr(10), '<br/>')}"
                 if finding.get("response_body"):
                     res_body_preview = finding.get('response_body')[:1500] + ("..." if len(finding.get('response_body')) > 1500 else "")
-                    # Escape HTML tags inside request/response strings to prevent PDF text rendering breaks
-                    res_body_preview = res_body_preview.replace('<', '&lt;').replace('>', '&gt;')
+                    res_body_preview = esc(res_body_preview).replace(chr(10), '<br/>')
                     res_text += f"<br/><br/><b>BODY PREVIEW:</b><br/>{res_body_preview}"
                 detail_rows.append([
                     Paragraph("<b>HTTP Response:</b>", meta_label_style), 
@@ -427,7 +450,7 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
             detail_rows.append([Paragraph("<b>AI Verification:</b>", meta_label_style), Paragraph(conf_str, meta_val_style)])
             
             if finding.get("ai_reasoning"):
-                detail_rows.append([Paragraph("<b>AI Analysis:</b>", meta_label_style), Paragraph(finding.get("ai_reasoning", ""), meta_val_style)])
+                detail_rows.append([Paragraph("<b>AI Analysis:</b>", meta_label_style), Paragraph(esc(finding.get("ai_reasoning", "")), meta_val_style)])
 
         if not is_executive:
             meta_links = []
@@ -455,5 +478,46 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
             details_table,
             Spacer(1, 15)
         ]))
+
+    # Informational findings are collapsed into a single grouped summary table
+    # (by alert type) rather than being rendered one-by-one.
+    if info_findings:
+        counts = {}
+        for f in info_findings:
+            name = f.get("alert") or "Uncategorized"
+            counts[name] = counts.get(name, 0) + 1
+
+        story.append(Spacer(1, 10))
+        story.append(Paragraph("Informational Findings Summary", h1_style))
+        story.append(Paragraph(
+            f"{len(info_findings)} informational findings were identified across "
+            f"{len(counts)} distinct types during passive analysis. They are grouped "
+            "by type below; individual instances are available in the JSON report.",
+            body_style
+        ))
+        story.append(Spacer(1, 10))
+
+        info_rows = [[
+            Paragraph("<b>Finding Type</b>", meta_label_style),
+            Paragraph("<b>Instances</b>", meta_label_style)
+        ]]
+        for name, count in sorted(counts.items(), key=lambda item: item[1], reverse=True):
+            info_rows.append([
+                Paragraph(esc(name), body_style),
+                Paragraph(str(count), body_style)
+            ])
+
+        info_table = Table(info_rows, colWidths=[420, 84], repeatRows=1)
+        info_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), light_bg),
+            ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+            ('ALIGN', (1, 0), (1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('TOPPADDING', (0, 0), (-1, -1), 6),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#CBD5E0")),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, light_bg]),
+        ]))
+        story.append(info_table)
 
     doc.build(story, canvasmaker=NumberedCanvas)
