@@ -32,7 +32,7 @@ An AI-powered, **1-click Dynamic Application Security Testing (DAST)** orchestra
 
 1. **Clone/Navigate to Workspace**:
    ```bash
-   cd /home/warkin/Projects/dast-mcp
+   cd dast-mcp
    ```
 
 2. **Activate the Virtual Environment**:
@@ -67,7 +67,7 @@ python3 dast_orchestrator.py https://example.com
 ### Option C: MCP Server Mode
 To integrate these tools into an MCP client, register the server script with the following path:
 ```bash
-/home/warkin/Projects/dast-mcp/venv/bin/python3 /home/warkin/Projects/dast-mcp/mcp_server.py
+/path/to/dast-mcp/venv/bin/python3 /path/to/dast-mcp/mcp_server.py
 ```
 
 ### Option D: Run Unit Tests
