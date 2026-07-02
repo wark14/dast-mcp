@@ -88,10 +88,19 @@ python3 dast_orchestrator.py https://example.com
 ```
 
 ### Option C: MCP Server Mode
-To integrate these tools into an MCP client, register the server script with the following path:
+The server supports two transports:
+
+**stdio (default)** — for local clients like Claude Desktop, which launch the process:
 ```bash
 /path/to/dast-mcp/venv/bin/python3 /path/to/dast-mcp/mcp_server.py
 ```
+
+**HTTP (Streamable HTTP)** — for networked/remote MCP clients. Run it as a long-lived server:
+```bash
+python3 mcp_server.py --transport http --host 0.0.0.0 --port 8000 --path /mcp
+```
+Clients then connect to `http://<host>:8000/mcp`. All flags also read from env vars
+(`MCP_TRANSPORT`, `MCP_HOST`, `MCP_PORT`, `MCP_PATH`), e.g. `MCP_TRANSPORT=http python3 mcp_server.py`.
 
 ### Option D: Run Unit Tests
 To execute the automated pipeline test suite:
