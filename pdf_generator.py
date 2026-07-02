@@ -2,7 +2,7 @@ import os
 import time
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether, PageBreak
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether, PageBreak, Image
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
@@ -65,6 +65,44 @@ class NumberedCanvas(canvas.Canvas):
         self.drawRightString(558, 45, page_text)
         
         self.restoreState()
+
+
+def create_severity_chart(stats, output_path="findings_severity_chart.png"):
+    """
+    Renders a severity-breakdown bar chart PNG from the report stats dict.
+    Uses the non-interactive 'Agg' backend so it is safe to run headless and
+    off the main thread (e.g. inside the Flask pipeline worker).
+    Returns the output path.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    severities = ["Critical", "High", "Medium", "Low", "Info"]
+    counts = [
+        stats.get("critical", 0),
+        stats.get("high", 0),
+        stats.get("medium", 0),
+        stats.get("low", 0),
+        stats.get("informational", 0)
+    ]
+    colors_list = ["#742A2A", "#C53030", "#DD6B20", "#3182CE", "#4A5568"]
+
+    plt.figure(figsize=(6, 3))
+    bars = plt.bar(severities, counts, color=colors_list)
+    plt.title("Vulnerabilities by Severity Level")
+    plt.ylabel("Number of Findings")
+    plt.grid(axis='y', linestyle='--', alpha=0.5)
+
+    # Annotate each bar with its count for at-a-glance reading.
+    for bar, count in zip(bars, counts):
+        plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                 str(count), ha='center', va='bottom', fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+    return output_path
 
 
 def get_severity_color(severity):
@@ -276,6 +314,17 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
         ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, light_bg]),
     ]))
     story.append(stats_table)
+    story.append(Spacer(1, 15))
+
+    # Severity distribution chart (satisfies the "Charts/graphs" report requirement).
+    try:
+        chart_path = create_severity_chart(stats)
+        if os.path.exists(chart_path):
+            story.append(Paragraph("Severity Distribution", h2_style))
+            story.append(Image(chart_path, width=360, height=180))
+    except Exception:
+        # Charts are a visual enhancement; never let a plotting failure break the report.
+        pass
     story.append(Spacer(1, 20))
 
     if is_executive:

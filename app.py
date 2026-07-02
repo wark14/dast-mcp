@@ -936,7 +936,58 @@ DASHBOARD_HTML = """
             </div>
 
             <div id="results-dashboard" style="display: none; flex-direction: column; gap: 1.5rem;">
-                
+
+                <!-- MAIN TABS: RECON / SCAN -->
+                <div class="card" style="padding-bottom: 0;">
+                    <div class="tabs-header">
+                        <button class="tab-btn active" id="maintab-recon" onclick="switchMainTab('recon')">🔎 Recon</button>
+                        <button class="tab-btn" id="maintab-scan" onclick="switchMainTab('scan')">🛡️ Scan</button>
+                    </div>
+                </div>
+
+                <!-- RECON PANEL -->
+                <div id="recon-panel" style="display: flex; flex-direction: column; gap: 1.5rem;">
+                    <div class="card">
+                        <div class="card-title">🔎 Reconnaissance Summary</div>
+                        <div class="stats-grid" style="margin-bottom: 1.25rem;">
+                            <div class="stat-card">
+                                <span class="stat-num" id="recon-pages">0</span>
+                                <span class="stat-label">Pages Crawled</span>
+                                <span class="stat-sub">Recon Agent</span>
+                            </div>
+                            <div class="stat-card">
+                                <span class="stat-num" id="recon-forms">0</span>
+                                <span class="stat-label">Forms Found</span>
+                                <span class="stat-sub">Attack surface</span>
+                            </div>
+                            <div class="stat-card">
+                                <span class="stat-num" id="recon-tech">0</span>
+                                <span class="stat-label">Technologies</span>
+                                <span class="stat-sub">Detected</span>
+                            </div>
+                        </div>
+                        <div class="detail-row">
+                            <div class="detail-label">Target</div>
+                            <div class="detail-val"><code id="recon-target">-</code></div>
+                        </div>
+                        <div class="detail-row">
+                            <div class="detail-label">Selected Scan Profile</div>
+                            <div class="detail-val" id="recon-profile">-</div>
+                        </div>
+                        <div class="detail-row">
+                            <div class="detail-label">Detected Technology Stack</div>
+                            <div class="framework-wrapper" id="recon-frameworks"></div>
+                        </div>
+                        <div class="detail-row">
+                            <div class="detail-label">Crawled Endpoints</div>
+                            <div class="code-box" id="recon-endpoints" style="max-height: 260px; overflow:auto;">-</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- SCAN PANEL -->
+                <div id="scan-panel" style="display: none; flex-direction: column; gap: 1.5rem;">
+
                 <!-- SUMMARY BANNER -->
                 <div class="card">
                     <div class="summary-banner">
@@ -1026,6 +1077,9 @@ DASHBOARD_HTML = """
                     </div>
                 </div>
 
+                </div>
+                <!-- /SCAN PANEL -->
+
             </div>
         </div>
     </main>
@@ -1052,6 +1106,7 @@ DASHBOARD_HTML = """
             document.getElementById('empty-dashboard').style.display = 'none';
             document.getElementById('results-dashboard').style.display = 'flex';
             document.getElementById('reports-section').style.display = 'none';
+            switchMainTab('recon');
             document.getElementById('results-target-title').innerText = "Scanning: " + urlInput;
             document.getElementById('risk-summary').innerText = "The Orchestrator is running. Recon and vulnerability checks are active...";
             
@@ -1149,7 +1204,34 @@ DASHBOARD_HTML = """
             const fwContainer = document.getElementById('frameworks-container');
             fwContainer.innerHTML = scanResultsData.frameworks.map(fw => `<span class="framework-badge">${fw}</span>`).join('');
 
+            renderReconResults();
             renderFindingsList();
+        }
+
+        function switchMainTab(name) {
+            document.getElementById('maintab-recon').className = name === 'recon' ? 'tab-btn active' : 'tab-btn';
+            document.getElementById('maintab-scan').className = name === 'scan' ? 'tab-btn active' : 'tab-btn';
+            document.getElementById('recon-panel').style.display = name === 'recon' ? 'flex' : 'none';
+            document.getElementById('scan-panel').style.display = name === 'scan' ? 'flex' : 'none';
+        }
+
+        function renderReconResults() {
+            if (!scanResultsData) return;
+            document.getElementById('recon-target').innerText = scanResultsData.target_url;
+            document.getElementById('recon-profile').innerText = scanResultsData.scan_profile || 'Standard Profile';
+            document.getElementById('recon-pages').innerText = scanResultsData.pages_crawled_count || 0;
+            document.getElementById('recon-forms').innerText = scanResultsData.forms_found_count || 0;
+
+            const fws = scanResultsData.frameworks || [];
+            document.getElementById('recon-tech').innerText = fws.length;
+            document.getElementById('recon-frameworks').innerHTML = fws.length
+                ? fws.map(fw => `<span class="framework-badge">${fw}</span>`).join('')
+                : '<span style="color:var(--text-muted);">None detected</span>';
+
+            const pages = scanResultsData.pages_crawled || [];
+            document.getElementById('recon-endpoints').innerText = pages.length
+                ? pages.join('\\n')
+                : 'No endpoints recorded.';
         }
 
         function switchTab(tabName) {

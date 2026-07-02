@@ -1,9 +1,10 @@
 import os
 import json
 import logging
-from fastmcp import FastMCP
+from fastmcp import FastMCP, Context
 from scan_engine import DASTScanEngine
 from agents import ValidationAgent, ReportAgent, PDFReportGenerator
+from pdf_generator import create_severity_chart
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -12,7 +13,16 @@ logger = logging.getLogger("DAST-MCP-Server")
 # Initialize FastMCP Server
 mcp = FastMCP(
     "DAST-Security-Testing-Server",
-    dependencies=["requests", "reportlab", "beautifulsoup4", "matplotlib"]
+    instructions=(
+        "AI-orchestrated DAST security testing toolkit. To run a full 1-click assessment, "
+        "chain the tools in this order: detect_framework -> crawl_site (reconnaissance), "
+        "run_zap_scan -> get_scan_results (scanning), validate_findings (AI review of High/Critical "
+        "findings ONLY, for false-positive reduction — this runs on your own model via MCP sampling, "
+        "no external API key required), then generate_report -> create_graphs -> "
+        "generate_pdf (Executive_Report.pdf and Technical_VA_Report.pdf). Only High and Critical "
+        "findings should be sent to validate_findings to conserve tokens; Medium/Low/Informational "
+        "findings pass through to the reports unchanged."
+    )
 )
 
 # Active scan cache database
@@ -113,10 +123,16 @@ def get_scan_results(scan_id: str) -> str:
     return json.dumps({"error": f"Scan ID {scan_id} not found in database cache."}, indent=2)
 
 @mcp.tool()
-def validate_findings(findings_json: str, api_key: str = None) -> str:
+async def validate_findings(findings_json: str, ctx: Context, api_key: str = None) -> str:
     """
-    Token-optimized finding validator. Reviews only High and Critical findings using LLM verification.
-    
+    Token-optimized finding validator. Reviews ONLY High and Critical findings.
+
+    Chooses the LLM automatically:
+      - If a Gemini key is available (the `api_key` arg or the GEMINI_API_KEY env var),
+        validation runs via Google Gemini.
+      - Otherwise it runs via the connected MCP client's own model (e.g. Claude) using
+        MCP sampling — no external API key is required.
+
     Args:
         findings_json: A JSON string list representing the raw ZAP findings.
         api_key: Optional Gemini API Key override.
@@ -125,10 +141,34 @@ def validate_findings(findings_json: str, api_key: str = None) -> str:
         findings = json.loads(findings_json)
     except Exception as e:
         return f"Invalid findings JSON: {str(e)}"
-        
-    validator = ValidationAgent(findings, api_key=api_key)
-    validated = validator.run()
-    return json.dumps(validated, indent=2)
+
+    agent = ValidationAgent(findings, api_key=api_key)
+    high_crit = agent.filter_high_critical()
+    logger.info(f"Validating {len(high_crit)} High/Critical findings out of {len(findings)} total.")
+    if not high_crit:
+        return json.dumps([], indent=2)
+
+    # Prefer an explicit Gemini key when one is configured (arg or env).
+    if agent.api_key:
+        return json.dumps(agent.run(), indent=2)
+
+    # No Gemini key -> ask the connected client model (Claude) to validate via MCP sampling.
+    try:
+        result = await ctx.sample(
+            agent.build_prompt(high_crit),
+            system_prompt=ValidationAgent.SYSTEM_PROMPT,
+            temperature=0.2,
+        )
+        validated = ValidationAgent.parse_validation_response(result.text)
+        logger.info(f"Validated {len(validated)} findings via MCP client sampling.")
+        return json.dumps(validated, indent=2)
+    except Exception as e:
+        logger.error(f"MCP client sampling unavailable: {e}")
+        return json.dumps({
+            "error": "AI validation needs either a GEMINI_API_KEY or an MCP client that supports "
+                     "sampling; neither was available. Scan/report tools still work without it.",
+            "detail": str(e),
+        }, indent=2)
 
 @mcp.tool()
 def generate_report(data_json: str) -> str:
@@ -182,35 +222,14 @@ def create_graphs(data_json: str) -> str:
     Args:
         data_json: A JSON string representing the scan stats.
     """
-    import matplotlib.pyplot as plt
     try:
         data = json.loads(data_json)
         stats = data.get("stats", {})
     except Exception as e:
         return f"Invalid stats JSON: {str(e)}"
 
-    severities = ["Critical", "High", "Medium", "Low", "Info"]
-    counts = [
-        stats.get("critical", 0),
-        stats.get("high", 0),
-        stats.get("medium", 0),
-        stats.get("low", 0),
-        stats.get("informational", 0)
-    ]
-    colors_list = ["#742A2A", "#C53030", "#DD6B20", "#3182CE", "#4A5568"]
+    chart_path = create_severity_chart(stats)
 
-    plt.figure(figsize=(6, 4))
-    plt.bar(severities, counts, color=colors_list)
-    plt.title("Vulnerabilities by Severity Level")
-    plt.xlabel("Severity")
-    plt.ylabel("Number of Findings")
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-    
-    chart_path = "findings_severity_chart.png"
-    plt.tight_layout()
-    plt.savefig(chart_path, dpi=150)
-    plt.close()
-    
     return json.dumps({
         "message": "Chart generated successfully.",
         "chart_image_path": chart_path
