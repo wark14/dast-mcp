@@ -55,56 +55,42 @@ class ScanAgent:
 
 
 class ValidationAgent:
+    # Shared LLM role prompt, reused by both the Gemini (webapp/CLI) path and the
+    # MCP client-sampling (Claude) path so validation behaves identically either way.
+    SYSTEM_PROMPT = (
+        "You are a Senior Web Application Penetration Tester and AI Security Agent. "
+        "You analyze High/Critical DAST findings, estimate the likelihood of false positives, "
+        "assign confidence scores, deduplicate similar findings, and provide concrete remediation."
+    )
+
     def __init__(self, raw_findings, api_key=None):
         self.raw_findings = raw_findings
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
 
-    def run(self):
-        logger.info("[Validation Agent] Reviewing High and Critical findings...")
-        
-        # 1. Filter High and Critical findings
-        high_crit_findings = [
-            f for f in self.raw_findings 
+    def filter_high_critical(self):
+        """Token optimization: only High/Critical findings are ever sent to an LLM."""
+        return [
+            f for f in self.raw_findings
             if str(f.get("risk", "")).lower() in ["critical", "high"]
         ]
-        
-        logger.info(f"[Validation Agent] Filtered {len(high_crit_findings)} High/Critical findings out of {len(self.raw_findings)} total.")
-        
-        if not high_crit_findings:
-            logger.info("[Validation Agent] No High/Critical findings to validate.")
-            return []
 
-        # STRICT RULE: If no API key is provided, we do NOT perform AI validation.
-        # This prevents showing "Analyzed by AI" or fake confidence ratings when AI was not actually used.
-        if not self.api_key:
-            logger.info("[Validation Agent] No API key detected. Skipping AI validation as requested.")
-            return []
-
-        # Run actual LLM Validation
-        return self._validate_with_llm(high_crit_findings)
-
-    def _validate_with_llm(self, findings):
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
-        headers = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": self.api_key
-        }
-        
-        prompt = (
-            "You are a Senior Web Application Penetration Tester and AI Security Agent. "
-            "Your task is to analyze the following High/Critical DAST vulnerability findings and determine "
-            "if they are likely false positives. Assess the likelihood of exploitation, assign a confidence score, "
-            "deduplicate any duplicates, and provide clear remediation steps.\n\n"
+    def build_prompt(self, findings):
+        """Builds the validation instruction + findings payload (LLM-agnostic)."""
+        return (
+            "Analyze the following High/Critical DAST vulnerability findings and determine "
+            "whether each is likely a false positive. Assess exploitability, assign a confidence "
+            "score, deduplicate similar findings, and provide clear remediation.\n\n"
             "Here is the list of findings in JSON format:\n"
             f"{json.dumps(findings, indent=2)}\n\n"
-            "Respond ONLY with a JSON array containing the validated results. Do not include markdown code block formatting (such as ```json). "
-            "Each element in the returned array MUST correspond to a finding ID from the input and have the following schema:\n"
+            "Respond ONLY with a JSON array containing the validated results. Do not include "
+            "markdown code block formatting (such as ```json). Each element MUST correspond to a "
+            "finding ID from the input and use the following schema:\n"
             "[\n"
             "  {\n"
             "    \"id\": \"<finding_id>\",\n"
             "    \"is_false_positive\": true/false,\n"
             "    \"confidence\": <float 0.0 to 1.0>,\n"
-            "    \"reasoning\": \"Detailed security justification explaining why this is/is not a false positive based on the description and evidence.\",\n"
+            "    \"reasoning\": \"Detailed security justification based on the description and evidence.\",\n"
             "    \"solution\": \"Specific remediation steps.\",\n"
             "    \"is_duplicate\": true/false,\n"
             "    \"duplicate_of_id\": \"<parent_id_if_duplicate_else_null>\"\n"
@@ -112,31 +98,72 @@ class ValidationAgent:
             "]"
         )
 
+    @staticmethod
+    def parse_validation_response(text):
+        """Parses an LLM response into a validated-findings list; tolerant of code fences."""
+        if not text:
+            return []
+        text = re.sub(r"^```json\s*", "", text.strip())
+        text = re.sub(r"\s*```$", "", text)
+        try:
+            data = json.loads(text)
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.error(f"[Validation Agent] Failed to parse validation response: {e}")
+            return []
+
+    def run(self):
+        """
+        Webapp/CLI entrypoint. Uses Google Gemini when a key is available; otherwise skips AI
+        validation entirely (no fabricated confidence/badges). When the pipeline is driven over
+        MCP, the connected client's own model performs validation instead — see
+        mcp_server.validate_findings — so no external key is required there.
+        """
+        logger.info("[Validation Agent] Reviewing High and Critical findings...")
+        high_crit = self.filter_high_critical()
+        logger.info(
+            f"[Validation Agent] Filtered {len(high_crit)} High/Critical findings out of "
+            f"{len(self.raw_findings)} total."
+        )
+
+        if not high_crit:
+            logger.info("[Validation Agent] No High/Critical findings to validate.")
+            return []
+
+        if not self.api_key:
+            logger.info("[Validation Agent] No Gemini API key detected. Skipping AI validation.")
+            return []
+
+        return self._validate_with_llm(high_crit)
+
+    def _validate_with_llm(self, findings):
+        """Gemini validation path (used by the webapp/CLI when GEMINI_API_KEY is set)."""
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
         payload = {
             "contents": [{
-                "parts": [{"text": prompt}]
+                "parts": [{"text": self.SYSTEM_PROMPT + "\n\n" + self.build_prompt(findings)}]
             }],
-            "generationConfig": {
-                "temperature": 0.2,
-                "responseMimeType": "application/json"
-            }
+            "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
         }
 
         try:
             response = requests.post(f"{url}?key={self.api_key}", json=payload, headers=headers, timeout=30)
             if response.status_code == 200:
                 res_data = response.json()
-                text_content = res_data['contents'][0]['parts'][0]['text']
-                text_content = re.sub(r"^```json\s*", "", text_content.strip())
-                text_content = re.sub(r"\s*```$", "", text_content)
-                validated_list = json.loads(text_content)
+                candidates = res_data.get("candidates", [])
+                if not candidates:
+                    logger.error(f"[Validation Agent] Gemini API returned no candidates (possibly blocked): {res_data}")
+                    return []
+                text_content = candidates[0]["content"]["parts"][0]["text"]
+                validated_list = self.parse_validation_response(text_content)
                 logger.info("[Validation Agent] Successfully validated findings via Gemini API.")
                 return validated_list
             else:
                 logger.error(f"[Validation Agent] Gemini API returned error code {response.status_code}: {response.text}")
         except Exception as e:
             logger.error(f"[Validation Agent] Exception occurred during Gemini API validation: {e}")
-            
+
         return []
 
 
@@ -276,6 +303,8 @@ class ReportAgent:
             "target_url": self.target_url,
             "scan_date": time.strftime("%Y-%m-%d %H:%M:%S UTC"),
             "frameworks": self.scan_config.get("frameworks", []),
+            "scan_profile": self.scan_config.get("scan_profile", "Standard Profile"),
+            "pages_crawled": self.scan_config.get("pages_to_scan", []),
             "pages_crawled_count": len(self.scan_config.get("pages_to_scan", [])),
             "forms_found_count": self.scan_config.get("detected_forms_count", 0),
             "risk_score": risk_score,

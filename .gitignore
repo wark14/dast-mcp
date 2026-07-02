@@ -18,6 +18,12 @@ technical_va_report.json
 findings_severity_chart.png
 *.pdf
 
+# Bundled OWASP ZAP install (created by ./setup_zap.sh) and its runtime logs
+zap/
+zap_daemon.log
+zap_install.log
+zap_boot_test.log
+
 # IDE folders
 .idea/
 .vscode/

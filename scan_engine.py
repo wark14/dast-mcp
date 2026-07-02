@@ -7,11 +7,18 @@ import time
 import json
 import logging
 import os
+import subprocess
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ScanEngine")
 
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 class DASTScanEngine:
+    # Shared handle to an auto-started ZAP daemon so it is launched once per process
+    # and reused across scans.
+    _zap_process = None
+
     def __init__(self, target_url):
         self.target_url = target_url
         self.parsed_url = urllib.parse.urlparse(target_url)
@@ -29,6 +36,7 @@ class DASTScanEngine:
         # Configure ZAP API connection parameters
         self.zap_url = os.environ.get("ZAP_API_URL", "http://localhost:8080").rstrip('/')
         self.zap_api_key = os.environ.get("ZAP_API_KEY", "")
+        self.parsed_zap = urllib.parse.urlparse(self.zap_url)
 
     def crawl_site(self, max_pages=15):
         """
@@ -154,31 +162,100 @@ class DASTScanEngine:
         self.frameworks_detected = list(set(detected))
         return self.frameworks_detected
 
+    def _zap_version(self):
+        """Returns the ZAP version string if the API is reachable, else None."""
+        try:
+            r = requests.get(
+                f"{self.zap_url}/JSON/core/view/version/",
+                params={"apikey": self.zap_api_key}, timeout=3
+            )
+            if r.status_code == 200:
+                return r.json().get("version")
+        except Exception:
+            return None
+        return None
+
+    def ensure_zap_running(self, startup_timeout=120):
+        """
+        Guarantees a reachable OWASP ZAP daemon before scanning. If one is already
+        up at ZAP_API_URL it is reused. Otherwise, when the target is a local ZAP
+        and the bundled install (./zap) exists, it is auto-started as a daemon.
+
+        Raises RuntimeError (no fallback / no fake findings) if ZAP cannot be made
+        available — scanning without a real scanner is never simulated.
+        """
+        version = self._zap_version()
+        if version:
+            logger.info(f"OWASP ZAP is reachable (version {version}).")
+            return
+
+        host = self.parsed_zap.hostname or "localhost"
+        if host not in ("localhost", "127.0.0.1"):
+            raise RuntimeError(
+                f"OWASP ZAP is required but not reachable at {self.zap_url}. "
+                f"That address is not a local instance this tool can start automatically — "
+                f"start ZAP there and retry."
+            )
+
+        zap_sh = os.path.join(PROJECT_DIR, "zap", "zap.sh")
+        jre_bin = os.path.join(PROJECT_DIR, "zap", "jre", "bin")
+        if not os.path.exists(zap_sh):
+            raise RuntimeError(
+                "OWASP ZAP is required but is not installed. Run './setup_zap.sh' to install a "
+                "self-contained ZAP (with a bundled Java runtime) into ./zap/, then retry the scan."
+            )
+
+        port = self.parsed_zap.port or 8080
+        logger.info("Starting bundled OWASP ZAP daemon (first startup can take ~30-60s)...")
+
+        # Use the bundled JRE so no system Java is required.
+        env = os.environ.copy()
+        jre_home = os.path.join(PROJECT_DIR, "zap", "jre")
+        if os.path.isdir(jre_home):
+            env["JAVA_HOME"] = jre_home
+            env["PATH"] = jre_bin + os.pathsep + env.get("PATH", "")
+
+        log_path = os.path.join(PROJECT_DIR, "zap_daemon.log")
+        with open(log_path, "ab") as logf:
+            DASTScanEngine._zap_process = subprocess.Popen(
+                [
+                    zap_sh, "-daemon",
+                    "-host", "127.0.0.1", "-port", str(port),
+                    "-config", "api.disablekey=true",
+                    "-config", "api.addrs.addr.name=.*",
+                    "-config", "api.addrs.addr.regex=true",
+                ],
+                stdout=logf, stderr=logf, cwd=os.path.join(PROJECT_DIR, "zap"), env=env
+            )
+
+        deadline = time.time() + startup_timeout
+        while time.time() < deadline:
+            version = self._zap_version()
+            if version:
+                logger.info(f"OWASP ZAP daemon is up (version {version}).")
+                return
+            if DASTScanEngine._zap_process.poll() is not None:
+                raise RuntimeError(
+                    f"The ZAP daemon exited during startup. See {log_path} for details."
+                )
+            time.sleep(3)
+
+        raise RuntimeError(
+            f"OWASP ZAP daemon did not become ready within {startup_timeout}s. See {log_path}."
+        )
+
     def run_dast_scan(self, use_ajax_spider=False):
         """
-        Checks if a running OWASP ZAP instance is active. If so, triggers ZAP
-        Standard or Ajax Spider depending on framework context.
-        If ZAP is unreachable, runs the local fallback crawler scanning engine.
+        Runs a real OWASP ZAP scan. Reconnaissance (framework detection + crawl) primes
+        the engine, then a reachable ZAP daemon is ensured (auto-started from ./zap if
+        needed) and the ZAP spider + active scanner are executed. There is no simulated
+        fallback: if ZAP is unavailable this raises rather than fabricating findings.
         """
         logger.info("Initializing DAST scan engine...")
         self.detect_framework()
         self.crawl_site()
-        
-        # Test ZAP API connection
-        zap_active = False
-        try:
-            logger.info(f"Testing connection to OWASP ZAP API at {self.zap_url}...")
-            r = requests.get(f"{self.zap_url}/JSON/core/view/version/", params={"apikey": self.zap_api_key}, timeout=3)
-            if r.status_code == 200:
-                zap_active = True
-                logger.info(f"OWASP ZAP API connected. Version: {r.json().get('version')}")
-        except Exception:
-            logger.info("OWASP ZAP API is not reachable on localhost:8080. Running local security inspection engine.")
-
-        if zap_active:
-            return self._run_real_zap_scan(use_ajax_spider)
-        else:
-            return self._run_local_fallback_scan()
+        self.ensure_zap_running()
+        return self._run_real_zap_scan(use_ajax_spider)
 
     def _run_real_zap_scan(self, use_ajax_spider):
         """Orchestrates actual OWASP ZAP spidering and vulnerability alert fetching."""
@@ -293,236 +370,3 @@ class DASTScanEngine:
             
         return scan_results
 
-    def _run_local_fallback_scan(self):
-        """Runs crawler checks and security analysis locally, generating complete mock request/response buffers."""
-        findings = []
-        current_time = time.strftime("%a, %d %b %Y %H:%M:%S GMT", time.gmtime())
-
-        # Common Headers Check
-        security_header_checks = [
-            ("Content-Security-Policy", "Medium", "Content Security Policy (CSP) Header Not Set", 
-             "CSP restricts the resources (such as JavaScript, CSS, Images) that the browser is allowed to load.",
-             "Configure your web server or application framework to send a valid Content-Security-Policy header.", "16"),
-            
-            ("X-Frame-Options", "Medium", "X-Frame-Options Header Not Set (Clickjacking vulnerability)", 
-             "Allows the page to be framed by external sites, opening users to clickjacking attacks.",
-             "Set the X-Frame-Options header to 'SAMEORIGIN' or 'DENY'.", "15"),
-            
-            ("X-Content-Type-Options", "Low", "X-Content-Type-Options Header Not Set", 
-             "The X-Content-Type-Options header prevents the browser from sniffing the MIME type, protecting against MIME-sniffing attacks.",
-             "Set X-Content-Type-Options: nosniff on all responses.", "16"),
-            
-            ("Strict-Transport-Security", "Low", "HTTP Strict Transport Security (HSTS) Header Not Set", 
-             "HSTS forces the browser to communicate only via HTTPS, protecting against SSL-stripping attacks.",
-             "Ensure the application enforces HTTPS and sends a Strict-Transport-Security header (e.g., max-age=31536000; includeSubDomains).", "16")
-        ]
-
-        for header_name, risk, alert_title, desc, solution, cwe_id in security_header_checks:
-            if header_name not in self.headers_analyzed:
-                req_h = f"GET {self.parsed_url.path or '/'} HTTP/1.1\nHost: {self.parsed_url.netloc}\nUser-Agent: AI-DAST-Agent/1.0\nAccept: text/html"
-                res_h = f"HTTP/1.1 200 OK\nDate: {current_time}\nServer: Apache\nContent-Type: text/html; charset=UTF-8\nConnection: keep-alive"
-                findings.append({
-                    "id": str(uuid.uuid4()),
-                    "alert": alert_title,
-                    "risk": risk,
-                    "confidence": "High",
-                    "url": self.target_url,
-                    "parameter": "",
-                    "description": desc,
-                    "solution": solution,
-                    "evidence": f"HTTP header '{header_name}' is missing.",
-                    "wascid": "15",
-                    "cweid": cwe_id,
-                    "request_header": req_h,
-                    "request_body": "",
-                    "response_header": res_h,
-                    "response_body": "<html><body><h1>Example Site</h1></body></html>",
-                    "other": "Identified automatically during header analysis."
-                })
-
-        # Server Information Leakage
-        server_val = self.headers_analyzed.get('Server', '')
-        x_powered_by_val = self.headers_analyzed.get('X-Powered-By', '')
-        if server_val or x_powered_by_val:
-            evidence_str = f"Server: {server_val}" if server_val else ""
-            if x_powered_by_val:
-                evidence_str += f" | X-Powered-By: {x_powered_by_val}"
-            req_h = f"GET {self.parsed_url.path or '/'} HTTP/1.1\nHost: {self.parsed_url.netloc}\nUser-Agent: AI-DAST-Agent/1.0"
-            res_h = f"HTTP/1.1 200 OK\nDate: {current_time}\nServer: {server_val}\nX-Powered-By: {x_powered_by_val}\nContent-Type: text/html"
-            findings.append({
-                "id": str(uuid.uuid4()),
-                "alert": "Web Server Information Disclosure",
-                "risk": "Low",
-                "confidence": "High",
-                "url": self.target_url,
-                "parameter": "",
-                "description": "The server banner or runtime environment version is exposed in HTTP response headers.",
-                "solution": "Configure the web server and application engine to disable version banners.",
-                "evidence": evidence_str,
-                "wascid": "13",
-                "cweid": "200",
-                "request_header": req_h,
-                "request_body": "",
-                "response_header": res_h,
-                "response_body": "<html><body>Loaded</body></html>",
-                "other": "Exposing versions increases exposure to automated target reconnaissance."
-            })
-
-        # CSRF Forms
-        for form in self.forms_found:
-            has_csrf = False
-            for inp in form['inputs']:
-                if re.search(r'csrf|token|xsrf|__RequestVerificationToken', inp['name'], re.I):
-                    has_csrf = True
-                    break
-            
-            if not has_csrf and form['method'] == 'post':
-                action_path = urllib.parse.urlparse(form['action_url']).path
-                req_h = f"POST {action_path} HTTP/1.1\nHost: {self.parsed_url.netloc}\nContent-Type: application/x-www-form-urlencoded\nUser-Agent: AI-DAST-Agent/1.0"
-                req_b = "&".join([f"{i['name']}=test_value" for i in form['inputs']])
-                res_h = f"HTTP/1.1 200 OK\nDate: {current_time}\nContent-Type: text/html\nConnection: keep-alive"
-                findings.append({
-                    "id": str(uuid.uuid4()),
-                    "alert": "Cross-Site Request Forgery (CSRF) Vulnerability",
-                    "risk": "High",
-                    "confidence": "Medium",
-                    "url": form['page_url'],
-                    "parameter": form['action_url'],
-                    "description": f"The form at {form['page_url']} submitting POST data to {form['action_url']} does not appear to contain a CSRF anti-forgery token.",
-                    "solution": "Implement an anti-CSRF token mechanism.",
-                    "evidence": f"Form submitting to {form['action_url']} contains inputs: " + ", ".join([i['name'] for i in form['inputs']]),
-                    "wascid": "9",
-                    "cweid": "352",
-                    "request_header": req_h,
-                    "request_body": req_b,
-                    "response_header": res_h,
-                    "response_body": "<html><body>Form Processed (No anti-CSRF check)</body></html>",
-                    "other": "CSRF vulnerabilities allow attackers to perform actions on behalf of authenticated users."
-                })
-
-        # Input parameter SQL Injection
-        input_params = []
-        for form in self.forms_found:
-            for inp in form['inputs']:
-                if inp['type'] in ['text', 'search', 'email', 'id', 'number'] and inp['name'] not in input_params:
-                    input_params.append((form['page_url'], inp['name']))
-
-        if input_params:
-            target_page, target_param = input_params[0]
-            target_path = urllib.parse.urlparse(target_page).path or '/'
-            req_h = f"POST {target_path} HTTP/1.1\nHost: {self.parsed_url.netloc}\nContent-Type: application/x-www-form-urlencoded\nUser-Agent: AI-DAST-Agent/1.0"
-            req_b = f"{target_param}=admin%27+UNION+SELECT+null%2C+null%2C+version%28%29+--+-"
-            res_h = f"HTTP/1.1 500 Internal Server Error\nDate: {current_time}\nContent-Type: text/html; charset=UTF-8\nConnection: close"
-            res_b = (
-                "<html><body><h1>Database Connection Failure</h1>\n"
-                "<p>You have an error in your SQL syntax; check the manual that corresponds "
-                "to your MySQL server version near 'UNION SELECT null, null, version() -- -'</p>\n"
-                "</body></html>"
-            )
-            findings.append({
-                "id": str(uuid.uuid4()),
-                "alert": "SQL Injection (SQLi)",
-                "risk": "Critical",
-                "confidence": "High",
-                "url": target_page,
-                "parameter": target_param,
-                "description": f"A SQL Injection vulnerability was identified in the '{target_param}' parameter of {target_page}.",
-                "solution": "Use parameterized queries (prepared statements) or ORM frameworks.",
-                "evidence": f"Parameter: {target_param}\nPayload: ' UNION SELECT null, null, version() -- -\nResponse change: SQL syntax error near 'UNION SELECT'",
-                "wascid": "19",
-                "cweid": "89",
-                "request_header": req_h,
-                "request_body": req_b,
-                "response_header": res_h,
-                "response_body": res_b,
-                "other": "Allows full database access, data modification, and potential OS command execution."
-            })
-        else:
-            req_h = f"GET /?id=1%27+AND+1%3D2+--+- HTTP/1.1\nHost: {self.parsed_url.netloc}\nUser-Agent: AI-DAST-Agent/1.0"
-            res_h = f"HTTP/1.1 500 Internal Server Error\nDate: {current_time}\nContent-Type: text/html"
-            findings.append({
-                "id": str(uuid.uuid4()),
-                "alert": "SQL Injection (SQLi) via query string",
-                "risk": "Critical",
-                "confidence": "High",
-                "url": f"{self.target_url}?id=1",
-                "parameter": "id",
-                "description": "SQL Injection was detected on the 'id' parameter.",
-                "solution": "Implement SQL query parametrization or utilize a secure ORM layer.",
-                "evidence": "Payload: 1' AND 1=1 -- - (normal response) vs 1' AND 1=2 -- - (empty/error response)",
-                "wascid": "19",
-                "cweid": "89",
-                "request_header": req_h,
-                "request_body": "",
-                "response_header": res_h,
-                "response_body": "<html><body>An error occurred in query execution: Unknown column in where clause</body></html>",
-                "other": "Critical finding. Requires immediate remediation."
-            })
-
-        # Input parameter XSS
-        if len(input_params) > 1:
-            target_page, target_param = input_params[1]
-        else:
-            target_page = self.target_url
-            target_param = "q"
-            
-        target_path = urllib.parse.urlparse(target_page).path or '/'
-        req_h = f"GET {target_path}?{target_param}=%3Cscript%3Ealert%281%29%3C%2Fscript%3E HTTP/1.1\nHost: {self.parsed_url.netloc}\nUser-Agent: AI-DAST-Agent/1.0"
-        res_h = f"HTTP/1.1 200 OK\nDate: {current_time}\nContent-Type: text/html; charset=utf-8"
-        res_b = f"<html><body><div class='search-box'>Result for <script>alert(1)</script></div></body></html>"
-        findings.append({
-            "id": str(uuid.uuid4()),
-            "alert": "Reflected Cross-Site Scripting (XSS)",
-            "risk": "High",
-            "confidence": "High",
-            "url": target_page,
-            "parameter": target_param,
-            "description": f"The application reflects input from the '{target_param}' parameter directly back to the browser without proper HTML sanitization.",
-            "solution": "Apply context-aware output encoding before printing input into the response page.",
-            "evidence": f"Parameter: {target_param}\nPayload: <script>alert(1)</script>\nResponse snippet: ...Value: <script>alert(1)</script>...",
-            "wascid": "8",
-            "cweid": "79",
-            "request_header": req_h,
-            "request_body": "",
-            "response_header": res_h,
-            "response_body": res_b,
-            "other": "Can be leveraged to steal session cookies, capture keyboard inputs (keylogging), or redirect users."
-        })
-
-        # RCE timing false positive
-        req_h = f"POST /search HTTP/1.1\nHost: {self.parsed_url.netloc}\nContent-Type: application/x-www-form-urlencoded\nUser-Agent: AI-DAST-Agent/1.0"
-        res_h = f"HTTP/1.1 200 OK\nDate: {current_time}\nContent-Type: text/html"
-        findings.append({
-            "id": str(uuid.uuid4()),
-            "alert": "Remote Code Execution (RCE) - Potential false positive",
-            "risk": "Critical",
-            "confidence": "Low",
-            "url": self.target_url,
-            "parameter": "cmd",
-            "description": "An indicator of shell execution was detected. A delay occurred during testing of parameter 'cmd'.",
-            "solution": "Do not pass user inputs directly to system commands.",
-            "evidence": "Payload: cmd=sleep 5\nDelay observed: 5.1 seconds.",
-            "wascid": "20",
-            "cweid": "94",
-            "request_header": req_h,
-            "request_body": "cmd=sleep+5",
-            "response_header": res_h,
-            "response_body": "<html><body>Search finished successfully.</body></html>",
-            "other": "Might be a false positive due to unstable network connectivity."
-        })
-
-        scan_results = {
-            "scan_id": self.scan_id,
-            "target_url": self.target_url,
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "frameworks": self.frameworks_detected,
-            "pages_crawled_count": len(self.crawled_urls),
-            "pages_crawled": list(self.crawled_urls),
-            "forms_found_count": len(self.forms_found),
-            "findings": findings
-        }
-        
-        with open(f"scan_results_{self.scan_id}.json", "w") as f:
-            json.dump(scan_results, f, indent=4)
-            
-        return scan_results

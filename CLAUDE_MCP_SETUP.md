@@ -2,6 +2,8 @@
 
 This guide outlines how to integrate the AI DAST MCP server with Claude Desktop. Once connected, Claude can directly execute vulnerability audits, detect web frameworks, run OWASP ZAP scanners, and compile PDF reports.
 
+> **Prerequisite:** OWASP ZAP is required and must be installed first with `./setup_zap.sh` (installs a self-contained ZAP into `./zap/`). The `run_zap_scan` tool auto-starts that bundled daemon; there is no simulated fallback.
+
 ---
 
 ## 🛠️ Exposed MCP Tools
@@ -12,9 +14,9 @@ The server registers the following tools via FastMCP:
 | :--- | :--- | :--- |
 | `detect_framework` | `url` (string) | Inspects cookies, headers, and scripts to determine web frameworks (e.g. React, Laravel). |
 | `crawl_site` | `url` (string) | Performs a fast crawl to index internal paths and state-changing forms. |
-| `run_zap_scan` | `url` (string) | Connects to OWASP ZAP (or fallback) to execute spidering and active vulnerability checks. |
+| `run_zap_scan` | `url` (string) | Runs a real OWASP ZAP scan (auto-starts the bundled ZAP daemon) to execute spidering and active vulnerability checks. |
 | `get_scan_results` | `scan_id` (string) | Retrieves parsed vulnerability data including request/response HTTP buffers. |
-| `validate_findings` | `findings_json` (string), `api_key` (string, opt) | Runs LLM checks on High/Critical alerts for false positive reduction. |
+| `validate_findings` | `findings_json` (string), `api_key` (string, opt) | Runs LLM checks on High/Critical alerts for false positive reduction. Uses **your own model (Claude) via MCP sampling — no key needed**; only falls back to Gemini if a key is provided. |
 | `generate_report` | `data_json` (string) | Compiles finding tables, computes risk scores (0-100), and outputs report schemas. |
 | `generate_pdf` | `report_json` (string) | Triggers ReportLab to render `Executive_Report.pdf` and `Technical_VA_Report.pdf`. |
 | `create_graphs` | `data_json` (string) | Generates severity breakdown bar-charts as PNGs. |
@@ -43,18 +45,24 @@ Claude Desktop reads configurations from the following system-specific locations
       "command": "/path/to/dast-mcp/venv/bin/python3",
       "args": [
         "/path/to/dast-mcp/mcp_server.py"
-      ],
-      "env": {
-        "GEMINI_API_KEY": "AIzaSy...",
-        "ZAP_API_URL": "http://localhost:8080",
-        "ZAP_API_KEY": "your-zap-api-key-here"
-      }
+      ]
     }
   }
 }
 ```
 
-*Note: Environment parameters inside the `"env"` object allow Claude to securely pass API keys and scanner URLs to the backend script.*
+The `"env"` block is entirely optional and can be omitted:
+
+- **No `GEMINI_API_KEY` needed.** When Claude drives this server, `validate_findings` runs on Claude's own model via MCP sampling. Add `GEMINI_API_KEY` only if you want to force Gemini to do the validation instead.
+- **`ZAP_API_URL` / `ZAP_API_KEY`** are only needed to point at an *external* ZAP. By default the bundled `./zap` (installed via `./setup_zap.sh`) is auto-started on `localhost:8080`.
+
+```json
+      "env": {
+        "GEMINI_API_KEY": "AIzaSy...",          // optional: use Gemini instead of Claude
+        "ZAP_API_URL": "http://localhost:8080", // optional: external ZAP
+        "ZAP_API_KEY": "your-zap-api-key-here"  // optional
+      }
+```
 
 3. Save the config file and **completely restart** Claude Desktop.
 

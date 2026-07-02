@@ -1,14 +1,16 @@
 # AI DAST Security Testing Agent (Orchestrator & MCP Server)
 
-An AI-powered, **1-click Dynamic Application Security Testing (DAST)** orchestration tool that integrates lightweight reconnaissance, OWASP ZAP scanning simulation, token-optimized AI validation, and professional PDF report generation.
+An AI-powered, **1-click Dynamic Application Security Testing (DAST)** orchestration tool that integrates lightweight reconnaissance, real **OWASP ZAP** scanning, token-optimized AI validation, and professional PDF report generation.
+
+> **OWASP ZAP is required.** Findings come exclusively from a real ZAP scan — there is no simulated/fallback scanner and no fabricated findings. A self-contained ZAP (bundled with its own Java runtime) is installed into `./zap/` via `./setup_zap.sh` and is auto-started on the first scan.
 
 ## 🚀 Key Features
 
 - **1-Click Scanning Pipeline**: Provide a URL; the Recon Agent, Scan Agent, Validation Agent, Report Agent, and PDF Generator run automatically in sequence.
 - **Multi-Agent Architecture**:
   - **Recon Agent**: Crawls target links, discovers input forms, detects technology stack/frameworks (React, Next.js, Django, WordPress, etc.), and sets the scan profile.
-  - **Scan Agent**: Runs automated DAST tests (security headers, cookie leakage, forms lacking anti-CSRF) and mimics custom OWASP ZAP configurations.
-  - **Validation Agent (Token-Optimized)**: Extracts only High and Critical findings and routes them to the Gemini LLM to eliminate false positives and explain vulnerability mechanics.
+  - **Scan Agent**: Drives a real **OWASP ZAP** scan — auto-starting the bundled ZAP daemon, running the standard or AJAX spider (chosen from the recon profile), then the active scanner, and extracting genuine alerts with their HTTP request/response evidence. No simulated findings.
+  - **Validation Agent (Token-Optimized)**: Extracts only High and Critical findings and routes them to an LLM to eliminate false positives and explain vulnerability mechanics. Over MCP it uses the **connected client's own model (e.g. Claude) via MCP sampling — no API key needed**; in the web app / CLI it optionally uses **Google Gemini** when `GEMINI_API_KEY` is set.
   - **Report Agent**: Dynamically computes risk scores (0-100), evaluates business impacts, and writes intermediate JSON report schemas.
   - **PDF Generator**: Compiles beautiful, letter-sized PDF reports (`Executive_Report.pdf` and `Technical_VA_Report.pdf`) featuring custom styling, page numbers ("Page X of Y"), and severity charts.
 - **MCP Server Capabilities**: Exposes the complete security toolkit as MCP tools for integration into Claude Desktop or other MCP-compatible clients.
@@ -40,12 +42,28 @@ An AI-powered, **1-click Dynamic Application Security Testing (DAST)** orchestra
    source venv/bin/activate
    ```
 
-3. **Configure API Key (Optional)**:
-   To run actual LLM-based verification using Gemini, set your API key:
+3. **Install OWASP ZAP (required, one-time)**:
+   ZAP is the scanning engine and is mandatory. This installs a self-contained ZAP
+   (with its own bundled Java runtime) into `./zap/` — no system Java or Docker needed:
    ```bash
-   export GEMINI_API_KEY="your-api-key-here"
+   ./setup_zap.sh
    ```
-   *Note: If no API key is supplied, the agent automatically falls back to an integrated Smart Fallback Heuristic Engine to simulate the AI validation analysis.*
+   The app auto-starts this ZAP daemon on the first scan (~30–60s the first time) and
+   reuses it afterwards. To point at an existing ZAP instead, set `ZAP_API_URL` (and
+   `ZAP_API_KEY` if enabled).
+
+4. **Configure API Key (Optional — web app / CLI only)**:
+   The Validation Agent needs an LLM. **How it gets one depends on how you run the tool:**
+   - **Over MCP (e.g. Claude Desktop / Claude Code):** validation runs on the client's own
+     model via MCP sampling. **No API key required** — nothing to configure here.
+   - **Web app / CLI:** set a Gemini key to enable validation:
+     ```bash
+     export GEMINI_API_KEY="your-api-key-here"
+     ```
+     If no key is supplied here, the Validation Agent is skipped — the scan still runs and both
+     reports are generated from the raw ZAP findings, but High/Critical findings won't carry AI
+     confidence scores, false-positive verdicts, or reasoning. This is intentional: it avoids
+     presenting "AI-verified" badges when no AI was actually used.
 
 ---
 
@@ -56,7 +74,11 @@ Launch the dark-themed web dashboard:
 ```bash
 python3 app.py
 ```
-Open [http://127.0.0.1:5000](http://127.0.0.1:5000) in your browser. Input your target URL, click **Start 1-Click Scan**, watch the real-time logs, and download the compiled PDFs!
+Open [http://127.0.0.1:5000](http://127.0.0.1:5000) in your browser. Input your target URL, click **Start 1-Click Scan**, and watch the real-time logs. Results are organized into two tabs:
+- **🔎 Recon** — detected technology stack, selected scan profile, crawled endpoints, and discovered forms (attack surface).
+- **🛡️ Scan** — risk score, severity breakdown, per-finding ZAP evidence, and (when a Gemini key is set) AI validation of High/Critical findings.
+
+Then download the compiled Executive and Technical PDFs.
 
 ### Option B: CLI Orchestrator
 Run a scan directly from your terminal:
