@@ -130,6 +130,13 @@ class TestDASTPipeline(unittest.TestCase):
         self.assertIsNotNone(xss)
         self.assertTrue(xss["is_false_positive"])
 
+    def test_mcp_http_transport_app_builds(self):
+        """The MCP server can serve over HTTP (Streamable HTTP) — its ASGI app is constructible."""
+        print("\n[TEST] Verifying MCP HTTP transport app builds...")
+        import mcp_server
+        app = mcp_server.mcp.http_app()  # raises if HTTP transport is unsupported/misconfigured
+        self.assertTrue(callable(app))
+
     def test_mcp_validation_via_client_sampling(self):
         """
         Over MCP with no Gemini key, validate_findings must run on the connected client's
