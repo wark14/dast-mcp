@@ -244,20 +244,26 @@ class DASTScanEngine:
             f"OWASP ZAP daemon did not become ready within {startup_timeout}s. See {log_path}."
         )
 
-    def run_dast_scan(self, use_ajax_spider=False):
+    def run_dast_scan(self, use_ajax_spider=False, active_scan=True):
         """
         Runs a real OWASP ZAP scan. Reconnaissance (framework detection + crawl) primes
         the engine, then a reachable ZAP daemon is ensured (auto-started from ./zap if
-        needed) and the ZAP spider + active scanner are executed. There is no simulated
-        fallback: if ZAP is unavailable this raises rather than fabricating findings.
+        needed) and the ZAP spider (+ optional active scanner) are executed. There is no
+        simulated fallback: if ZAP is unavailable this raises rather than fabricating findings.
+
+        Args:
+            use_ajax_spider: Force the AJAX spider (auto-selected for SPAs otherwise).
+            active_scan: When True, run ZAP's active scanner, which sends intrusive attack
+                payloads (SQLi, XSS, etc.). When False, only the spider + passive analysis
+                run — safe, non-intrusive, but limited to what passive rules can detect.
         """
         logger.info("Initializing DAST scan engine...")
         self.detect_framework()
         self.crawl_site()
         self.ensure_zap_running()
-        return self._run_real_zap_scan(use_ajax_spider)
+        return self._run_real_zap_scan(use_ajax_spider, active_scan=active_scan)
 
-    def _run_real_zap_scan(self, use_ajax_spider):
+    def _run_real_zap_scan(self, use_ajax_spider, active_scan=True):
         """Orchestrates actual OWASP ZAP spidering and vulnerability alert fetching."""
         apikey_param = {"apikey": self.zap_api_key}
         
@@ -296,22 +302,38 @@ class DASTScanEngine:
                     break
                 time.sleep(2)
 
-        # 2. Start ZAP Active Scan
-        logger.info("[ZAP Scan] Triggering ZAP Active Scanner...")
-        ascan_url = f"{self.zap_url}/JSON/ascan/action/scan/"
-        params = {"url": self.target_url, "recurse": "true", **apikey_param}
-        ascan_res = requests.get(ascan_url, params=params).json()
-        ascan_id = ascan_res.get("scan")
-        
-        # Poll Active Scanner
-        ascan_status_url = f"{self.zap_url}/JSON/ascan/view/status/"
-        while True:
-            status_res = requests.get(ascan_status_url, params={"scanId": ascan_id, **apikey_param}).json()
-            status = status_res.get("status")
-            logger.info(f"[ZAP Scan] Active Scanner Progress: {status}%")
-            if int(status) >= 100:
-                break
-            time.sleep(3)
+        # 2. Start ZAP Active Scan (optional — intrusive attack payloads)
+        if active_scan:
+            logger.info("[ZAP Scan] Triggering ZAP Active Scanner...")
+            ascan_url = f"{self.zap_url}/JSON/ascan/action/scan/"
+            params = {"url": self.target_url, "recurse": "true", **apikey_param}
+            ascan_res = requests.get(ascan_url, params=params).json()
+            ascan_id = ascan_res.get("scan")
+
+            # Poll Active Scanner
+            ascan_status_url = f"{self.zap_url}/JSON/ascan/view/status/"
+            while True:
+                status_res = requests.get(ascan_status_url, params={"scanId": ascan_id, **apikey_param}).json()
+                status = status_res.get("status")
+                logger.info(f"[ZAP Scan] Active Scanner Progress: {status}%")
+                if int(status) >= 100:
+                    break
+                time.sleep(3)
+        else:
+            logger.info("[ZAP Scan] Active scanning DISABLED — running passive analysis only (no attack payloads).")
+
+        # 2b. Let the passive scanner drain so passive alerts are complete before we pull them.
+        try:
+            pscan_url = f"{self.zap_url}/JSON/pscan/view/recordsToScan/"
+            deadline = time.time() + 60
+            while time.time() < deadline:
+                records = requests.get(pscan_url, params=apikey_param).json().get("recordsToScan")
+                if records is None or int(records) == 0:
+                    break
+                logger.info(f"[ZAP Scan] Passive scanner draining: {records} records remaining...")
+                time.sleep(2)
+        except Exception:
+            pass
 
         # 3. Pull ZAP Alerts
         logger.info("[ZAP Scan] Extracting alerts from ZAP Core...")
@@ -362,9 +384,10 @@ class DASTScanEngine:
             "pages_crawled_count": len(self.crawled_urls),
             "pages_crawled": list(self.crawled_urls),
             "forms_found_count": len(self.forms_found),
+            "active_scan": active_scan,
             "findings": findings
         }
-        
+
         with open(f"scan_results_{self.scan_id}.json", "w") as f:
             json.dump(scan_results, f, indent=4)
             

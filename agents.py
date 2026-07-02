@@ -46,10 +46,15 @@ class ScanAgent:
         self.scan_config = scan_config
 
     def run(self):
-        logger.info(f"[Scan Agent] Running DAST scan on: {self.scan_config['target_url']}")
+        active_scan = self.scan_config.get("active_scan", True)
+        mode = "active + passive" if active_scan else "passive only"
+        logger.info(f"[Scan Agent] Running DAST scan ({mode}) on: {self.scan_config['target_url']}")
         engine = DASTScanEngine(self.scan_config['target_url'])
-        # Pass dynamic spider preference determined by Recon Agent
-        scan_results = engine.run_dast_scan(use_ajax_spider=self.scan_config.get("use_ajax_spider", False))
+        # Pass dynamic spider preference determined by Recon Agent and the active-scan toggle.
+        scan_results = engine.run_dast_scan(
+            use_ajax_spider=self.scan_config.get("use_ajax_spider", False),
+            active_scan=active_scan,
+        )
         logger.info(f"[Scan Agent] Scan completed. Found {len(scan_results['findings'])} total raw findings.")
         return scan_results
 
@@ -304,6 +309,7 @@ class ReportAgent:
             "scan_date": time.strftime("%Y-%m-%d %H:%M:%S UTC"),
             "frameworks": self.scan_config.get("frameworks", []),
             "scan_profile": self.scan_config.get("scan_profile", "Standard Profile"),
+            "active_scan": self.scan_config.get("active_scan", True),
             "pages_crawled": self.scan_config.get("pages_to_scan", []),
             "pages_crawled_count": len(self.scan_config.get("pages_to_scan", [])),
             "forms_found_count": self.scan_config.get("detected_forms_count", 0),

@@ -10,7 +10,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("DASTOrchestrator")
 
-def run_orchestrator(target_url, api_key=None):
+def run_orchestrator(target_url, api_key=None, active_scan=True):
     print("=" * 60)
     print("      AI-POWERED 1-CLICK DAST SECURITY TESTING AGENT      ")
     print("=" * 60)
@@ -20,10 +20,12 @@ def run_orchestrator(target_url, api_key=None):
     print("[+] Phase 1: Launching Recon Agent...")
     recon = ReconAgent(target_url)
     scan_config = recon.run()
+    scan_config["active_scan"] = active_scan
     print(f"    - Frameworks Detected: {scan_config['frameworks']}")
     print(f"    - Pages to Scan: {len(scan_config['pages_to_scan'])}")
     print(f"    - Forms Found: {scan_config['detected_forms_count']}")
-    print(f"    - Profile Selected: {scan_config['scan_profile']}\n")
+    print(f"    - Profile Selected: {scan_config['scan_profile']}")
+    print(f"    - Active Scan: {'ENABLED (intrusive)' if active_scan else 'DISABLED (passive only)'}\n")
 
     # Step 2: Scan Agent (OWASP ZAP Emulator)
     print("[+] Phase 2: Launching Scan Agent (DAST Scanning)...")
@@ -78,6 +80,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AI DAST Orchestrator Command Line Tool")
     parser.add_argument("url", nargs="?", default="https://example.com", help="Target URL to scan")
     parser.add_argument("--api-key", help="Gemini API Key for validation")
+    parser.add_argument(
+        "--no-active-scan", dest="active_scan", action="store_false",
+        help="Disable the ZAP active scanner (run a safe, passive-only scan: spider + response analysis)"
+    )
+    parser.set_defaults(active_scan=True)
     args = parser.parse_args()
 
-    run_orchestrator(args.url, api_key=args.api_key)
+    run_orchestrator(args.url, api_key=args.api_key, active_scan=args.active_scan)
