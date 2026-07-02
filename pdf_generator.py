@@ -386,6 +386,28 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
         if not display_findings:
             story.append(Paragraph("No Low or higher severity findings were identified.", body_style))
 
+    # Monospace style for HTTP payloads. Rendered as standalone story flowables (not table
+    # cells) so long request/response content can SPLIT across pages — a table row cannot,
+    # which previously raised a LayoutError on findings with large HTTP messages.
+    code_style = ParagraphStyle(
+        'CodeBlock',
+        parent=styles['Normal'],
+        fontName='Courier',
+        fontSize=7,
+        leading=9,
+        textColor=dark_gray,
+        backColor=light_bg,
+        borderPadding=6,
+        leftIndent=4,
+        spaceAfter=10,
+    )
+
+    # Cap for content placed inside (non-splittable) table cells, so a single row can never
+    # exceed a page height.
+    def cap(text, limit=1200):
+        text = text or ""
+        return text[:limit] + (" ..." if len(text) > limit else "")
+
     for idx, finding in enumerate(display_findings, 1):
         severity = finding.get("risk", "Low")
         sev_color = get_severity_color(severity)
@@ -413,31 +435,7 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
         detail_rows.append([Paragraph("<b>Remediation:</b>", meta_label_style), Paragraph(esc(finding.get("solution", "")), meta_val_style)])
 
         if finding.get("evidence"):
-            detail_rows.append([Paragraph("<b>Evidence:</b>", meta_label_style), Paragraph(f"<font face='Courier' size='8'>{esc(finding.get('evidence', ''))}</font>", meta_val_style)])
-
-        # Request / Response output details for Technical Report only
-        if not is_executive:
-            if finding.get("request_header"):
-                # Escape first so raw HTTP content is literal, then turn real
-                # newlines into <br/> line breaks that reportlab understands.
-                req_text = f"<b>HEADERS:</b><br/>{esc(finding.get('request_header')).replace(chr(10), '<br/>')}"
-                if finding.get("request_body"):
-                    req_text += f"<br/><br/><b>BODY:</b><br/>{esc(finding.get('request_body'))}"
-                detail_rows.append([
-                    Paragraph("<b>HTTP Request:</b>", meta_label_style),
-                    Paragraph(f"<font face='Courier' size='7'>{req_text}</font>", meta_val_style)
-                ])
-
-            if finding.get("response_header"):
-                res_text = f"<b>HEADERS:</b><br/>{esc(finding.get('response_header')).replace(chr(10), '<br/>')}"
-                if finding.get("response_body"):
-                    res_body_preview = finding.get('response_body')[:1500] + ("..." if len(finding.get('response_body')) > 1500 else "")
-                    res_body_preview = esc(res_body_preview).replace(chr(10), '<br/>')
-                    res_text += f"<br/><br/><b>BODY PREVIEW:</b><br/>{res_body_preview}"
-                detail_rows.append([
-                    Paragraph("<b>HTTP Response:</b>", meta_label_style), 
-                    Paragraph(f"<font face='Courier' size='7'>{res_text}</font>", meta_val_style)
-                ])
+            detail_rows.append([Paragraph("<b>Evidence:</b>", meta_label_style), Paragraph(f"<font face='Courier' size='8'>{esc(cap(finding.get('evidence', '')))}</font>", meta_val_style)])
 
         # AI validation sections (strictly conditional on ai_used)
         if ai_used and "ai_confidence" in finding:
@@ -473,11 +471,34 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
             ('LINEBELOW', (0,0), (-1,-2), 0.5, colors.HexColor("#E2E8F0")),
         ]))
 
-        story.append(KeepTogether([
-            header_table,
-            details_table,
-            Spacer(1, 15)
-        ]))
+        # HTTP request/response payloads (Technical report only) are rendered as standalone
+        # flowables AFTER the details table so they can split across pages. Placing them in a
+        # table cell (which cannot split) is what raised the LayoutError on large messages.
+        http_flowables = []
+        if not is_executive:
+            if finding.get("request_header"):
+                # Escape first so raw HTTP content is literal, then turn real newlines into
+                # <br/> line breaks that reportlab understands.
+                req_text = f"<b>HEADERS:</b><br/>{esc(finding.get('request_header')).replace(chr(10), '<br/>')}"
+                if finding.get("request_body"):
+                    req_text += f"<br/><br/><b>BODY:</b><br/>{esc(cap(finding.get('request_body'), 2000)).replace(chr(10), '<br/>')}"
+                http_flowables.append(Paragraph("<b>HTTP Request:</b>", meta_label_style))
+                http_flowables.append(Paragraph(req_text, code_style))
+
+            if finding.get("response_header"):
+                res_text = f"<b>HEADERS:</b><br/>{esc(finding.get('response_header')).replace(chr(10), '<br/>')}"
+                if finding.get("response_body"):
+                    res_body_preview = esc(cap(finding.get('response_body'), 1500)).replace(chr(10), '<br/>')
+                    res_text += f"<br/><br/><b>BODY PREVIEW:</b><br/>{res_body_preview}"
+                http_flowables.append(Paragraph("<b>HTTP Response:</b>", meta_label_style))
+                http_flowables.append(Paragraph(res_text, code_style))
+
+        # Keep the header with its (bounded) details table so a finding never starts with an
+        # orphaned header at the bottom of a page. The HTTP payloads flow (and split) after it.
+        story.append(KeepTogether([header_table, details_table]))
+        for fl in http_flowables:
+            story.append(fl)
+        story.append(Spacer(1, 15))
 
     # Informational findings are collapsed into a single grouped summary table
     # (by alert type) rather than being rendered one-by-one.

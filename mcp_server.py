@@ -239,4 +239,38 @@ def create_graphs(data_json: str) -> str:
     }, indent=2)
 
 if __name__ == "__main__":
-    mcp.run()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="DAST Security Testing MCP Server")
+    parser.add_argument(
+        "--transport",
+        default=os.environ.get("MCP_TRANSPORT", "stdio"),
+        choices=["stdio", "http", "streamable-http", "sse"],
+        help="MCP transport to serve on. Default 'stdio' (for Claude Desktop / local clients). "
+             "Use 'http' to expose a networked Streamable HTTP endpoint. Env: MCP_TRANSPORT.",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("MCP_HOST", "127.0.0.1"),
+        help="Host/interface to bind for HTTP transports (default: 127.0.0.1). Env: MCP_HOST.",
+    )
+    parser.add_argument(
+        "--port", type=int,
+        default=int(os.environ.get("MCP_PORT", "8000")),
+        help="Port to bind for HTTP transports (default: 8000). Env: MCP_PORT.",
+    )
+    parser.add_argument(
+        "--path",
+        default=os.environ.get("MCP_PATH", "/mcp"),
+        help="URL path for the HTTP MCP endpoint (default: /mcp). Env: MCP_PATH.",
+    )
+    args = parser.parse_args()
+
+    if args.transport == "stdio":
+        mcp.run()
+    else:
+        logger.info(
+            f"Starting DAST MCP server over {args.transport} at "
+            f"http://{args.host}:{args.port}{args.path}"
+        )
+        mcp.run(transport=args.transport, host=args.host, port=args.port, path=args.path)

@@ -74,3 +74,15 @@ Once restarted, look for the **plug icon** 🔌 in the bottom-right corner of th
 
 You can verify the connection by prompting Claude:
 > *"List the tools available on the dast-security-testing-agent server and run a quick framework check on https://example.com"*
+
+---
+
+## 🌐 HTTP Transport (remote / networked clients)
+
+Claude Desktop launches the server over **stdio** (the config above). For MCP clients that connect to a URL instead of spawning the process, run the server over **Streamable HTTP**:
+
+```bash
+python3 mcp_server.py --transport http --host 0.0.0.0 --port 8000 --path /mcp
+```
+
+Clients then point at `http://<host>:8000/mcp`. The transport can also be set via environment variables (`MCP_TRANSPORT=http`, `MCP_HOST`, `MCP_PORT`, `MCP_PATH`), which is handy inside the `"env"` block of a client config. Bind to `127.0.0.1` unless the endpoint is intentionally exposed, and place it behind TLS/auth for any non-local use.
