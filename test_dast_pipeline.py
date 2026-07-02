@@ -187,6 +187,8 @@ class TestDASTPipeline(unittest.TestCase):
         self.assertIn("scan_profile", report_data)
         self.assertIn("pages_crawled", report_data)
         self.assertFalse(report_data["ai_used"])
+        # active_scan defaults to True when not specified in the scan config.
+        self.assertTrue(report_data["active_scan"])
         self.assertEqual(report_data["stats"]["critical"], 1)
         self.assertEqual(report_data["stats"]["high"], 1)
 
@@ -198,6 +200,17 @@ class TestDASTPipeline(unittest.TestCase):
 
         # Cleanup
         for path in [exec_pdf, tech_pdf, "executive_report.json",
+                     "technical_va_report.json", "findings_severity_chart.png"]:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_active_scan_toggle_flows_to_report(self):
+        """The active_scan choice on the scan config propagates into the report."""
+        print("\n[TEST] Verifying active_scan toggle propagates...")
+        passive_config = dict(SAMPLE_SCAN_CONFIG, active_scan=False)
+        report = ReportAgent(self.target_url, passive_config, list(SAMPLE_FINDINGS), []).run()
+        self.assertFalse(report["active_scan"])
+        for path in ["Executive_Report.pdf", "Technical_VA_Report.pdf", "executive_report.json",
                      "technical_va_report.json", "findings_severity_chart.png"]:
             if os.path.exists(path):
                 os.remove(path)

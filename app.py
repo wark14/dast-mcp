@@ -27,7 +27,7 @@ def add_log(message):
     timestamp = time.strftime("%H:%M:%S")
     scan_state["logs"].append(f"[{timestamp}] {message}")
 
-def run_dast_pipeline_thread(target_url, api_key):
+def run_dast_pipeline_thread(target_url, api_key, active_scan=True):
     global scan_state
     
     try:
@@ -46,13 +46,14 @@ def run_dast_pipeline_thread(target_url, api_key):
         add_log("Invoking Recon Agent...")
         recon = ReconAgent(target_url)
         scan_config = recon.run()
+        scan_config["active_scan"] = active_scan
         add_log(f"Recon completed. Detected framework(s): {', '.join(scan_config['frameworks'] or ['Generic Web App'])}")
         add_log(f"Recon profile selected: {scan_config['scan_profile']}")
         add_log(f"Recon discovered {len(scan_config['pages_to_scan'])} unique application endpoints.")
         
         # Step 2: Scan Agent
         scan_state["progress"] = 35
-        add_log("Invoking Scan Agent (OWASP ZAP)...")
+        add_log(f"Invoking Scan Agent (OWASP ZAP, {'active + passive scan' if active_scan else 'passive-only scan'})...")
         scan = ScanAgent(scan_config)
         scan_results = scan.run()
         add_log(f"Scan Agent completed. Found {len(scan_results['findings'])} raw security alerts.")
@@ -281,6 +282,25 @@ DASHBOARD_HTML = """
             color: var(--text-muted);
             margin-bottom: 0.5rem;
             font-weight: 500;
+        }
+
+        .toggle-row {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            font-size: 0.85rem;
+            color: var(--text-main);
+            font-weight: 500;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .toggle-row input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            accent-color: var(--primary);
+            cursor: pointer;
+            flex-shrink: 0;
         }
 
         .form-input {
@@ -895,6 +915,16 @@ DASHBOARD_HTML = """
                         Provide a Gemini API Key to enable the Validation Agent. If empty, the scanning engine will report ZAP findings directly without mock AI status badges.
                     </p>
                 </div>
+                <div class="form-group">
+                    <label class="toggle-row" for="active-scan">
+                        <input type="checkbox" id="active-scan" checked>
+                        <span>Enable Active Scan <span style="color: var(--high); font-weight: 600;">(intrusive)</span></span>
+                    </label>
+                    <p style="font-size: 0.65rem; color: var(--text-muted); margin-top: 0.25rem;">
+                        Active scan sends real attack payloads (SQLi, XSS, etc.) — only run it against targets you are authorized to test. Uncheck for a safe <strong>passive-only</strong> scan (spider + response analysis, no attacks).
+                    </p>
+                </div>
+
                 <button class="btn" id="scan-btn" onclick="startScan()">
                     <span>Start 1-Click Scan</span>
                 </button>
@@ -973,6 +1003,10 @@ DASHBOARD_HTML = """
                         <div class="detail-row">
                             <div class="detail-label">Selected Scan Profile</div>
                             <div class="detail-val" id="recon-profile">-</div>
+                        </div>
+                        <div class="detail-row">
+                            <div class="detail-label">Scan Mode</div>
+                            <div class="detail-val" id="recon-scanmode">-</div>
                         </div>
                         <div class="detail-row">
                             <div class="detail-label">Detected Technology Stack</div>
@@ -1092,7 +1126,8 @@ DASHBOARD_HTML = """
         function startScan() {
             const urlInput = document.getElementById('target-url').value;
             const apiKeyInput = document.getElementById('api-key').value;
-            
+            const activeScan = document.getElementById('active-scan').checked;
+
             if (!urlInput) {
                 alert("Please enter a valid target URL");
                 return;
@@ -1113,7 +1148,7 @@ DASHBOARD_HTML = """
             fetch('/scan', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url: urlInput, api_key: apiKeyInput })
+                body: JSON.stringify({ url: urlInput, api_key: apiKeyInput, active_scan: activeScan })
             })
             .then(res => res.json())
             .then(data => {
@@ -1219,6 +1254,9 @@ DASHBOARD_HTML = """
             if (!scanResultsData) return;
             document.getElementById('recon-target').innerText = scanResultsData.target_url;
             document.getElementById('recon-profile').innerText = scanResultsData.scan_profile || 'Standard Profile';
+            document.getElementById('recon-scanmode').innerHTML = (scanResultsData.active_scan === false)
+                ? 'Passive only <span style="color:var(--text-muted);">(spider + response analysis, no attack payloads)</span>'
+                : 'Active + Passive <span style="color:var(--high);">(intrusive attack payloads)</span>';
             document.getElementById('recon-pages').innerText = scanResultsData.pages_crawled_count || 0;
             document.getElementById('recon-forms').innerText = scanResultsData.forms_found_count || 0;
 
@@ -1383,11 +1421,12 @@ def scan():
     payload = request.json or {}
     url = payload.get("url", "https://example.com").strip()
     api_key = payload.get("api_key", "").strip() or None
-    
+    active_scan = bool(payload.get("active_scan", True))
+
     if not url.startswith("http://") and not url.startswith("https://"):
         url = "https://" + url
 
-    t = threading.Thread(target=run_dast_pipeline_thread, args=(url, api_key))
+    t = threading.Thread(target=run_dast_pipeline_thread, args=(url, api_key, active_scan))
     t.daemon = True
     t.start()
     

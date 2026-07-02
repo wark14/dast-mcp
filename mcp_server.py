@@ -81,17 +81,20 @@ def detect_framework(url: str) -> str:
     }, indent=2)
 
 @mcp.tool()
-def run_zap_scan(url: str) -> str:
+def run_zap_scan(url: str, active_scan: bool = True) -> str:
     """
-    Triggers a full DAST scan simulation on the target URL (crawling, framework detection, and vulnerability testing).
-    Saves the result to the scan database cache.
-    
+    Runs a real OWASP ZAP DAST scan on the target URL (crawling, framework detection, and
+    vulnerability testing). Auto-starts the bundled ZAP daemon. Saves the result to the cache.
+
     Args:
         url: The target website URL.
+        active_scan: When True (default), run ZAP's active scanner, which sends intrusive
+            attack payloads (SQLi, XSS, etc.) — only use on targets you are authorized to test.
+            When False, run a safe passive-only scan (spider + response analysis, no attacks).
     """
-    logger.info(f"Triggering scan for target: {url}")
+    logger.info(f"Triggering scan for target: {url} (active_scan={active_scan})")
     engine = DASTScanEngine(url)
-    scan_results = engine.run_dast_scan()
+    scan_results = engine.run_dast_scan(active_scan=active_scan)
     scan_id = scan_results["scan_id"]
     SCANS_DB[scan_id] = scan_results
     return json.dumps({
