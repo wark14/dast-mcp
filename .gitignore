@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+venv/
+ENV/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Dynamic scan data caches and local reports
+scan_results_*.json
+executive_report.json
+technical_va_report.json
+findings_severity_chart.png
+*.pdf
+
+# IDE folders
+.idea/
+.vscode/
