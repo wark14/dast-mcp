@@ -18,7 +18,9 @@ scan_state = {
     "logs": [],
     "target_url": "",
     "error_message": "",
-    "results": None
+    "results": None,
+    "exec_pdf": None,       # actual path of the generated Executive PDF (scan-id suffixed)
+    "tech_pdf": None        # actual path of the generated Technical PDF (scan-id suffixed)
 }
 
 scan_lock = threading.Lock()
@@ -56,40 +58,50 @@ def run_dast_pipeline_thread(target_url, api_key, active_scan=True):
         add_log(f"Invoking Scan Agent (OWASP ZAP, {'active + passive scan' if active_scan else 'passive-only scan'})...")
         scan = ScanAgent(scan_config)
         scan_results = scan.run()
-        add_log(f"Scan Agent completed. Found {len(scan_results['findings'])} raw security alerts.")
+        crit_count = sum(1 for f in scan_results['findings'] if f.get('risk', '').lower() == 'critical')
+        high_count = sum(1 for f in scan_results['findings'] if f.get('risk', '').lower() == 'high')
+        add_log(f"Scan Agent completed. Found {len(scan_results['findings'])} raw security alerts (Severity counts: {crit_count} Critical, {high_count} High).")
         
         # Step 3: Validation Agent
         scan_state["progress"] = 60
         if api_key:
-            add_log("Invoking Validation Agent (Filtering High & Critical findings for AI verification)...")
+            add_log(f"Invoking Validation Agent (Filtering High & Critical findings for AI verification)...")
         else:
             add_log("Invoking Validation Agent (No API Key specified - skipping AI check)...")
         validator = ValidationAgent(scan_results["findings"], api_key=api_key)
         validated_findings = validator.run()
         if api_key:
-            add_log(f"Validation Agent completed. AI verified {len(validated_findings)} High/Critical findings.")
+            tp_crit = sum(1 for f in validated_findings if not f.get('is_false_positive') and next((x.get('risk','').lower() for x in scan_results['findings'] if x['id'] == f['id']), '') == 'critical')
+            tp_high = sum(1 for f in validated_findings if not f.get('is_false_positive') and next((x.get('risk','').lower() for x in scan_results['findings'] if x['id'] == f['id']), '') == 'high')
+            fp_crit = sum(1 for f in validated_findings if f.get('is_false_positive') and next((x.get('risk','').lower() for x in scan_results['findings'] if x['id'] == f['id']), '') == 'critical')
+            fp_high = sum(1 for f in validated_findings if f.get('is_false_positive') and next((x.get('risk','').lower() for x in scan_results['findings'] if x['id'] == f['id']), '') == 'high')
+            add_log(f"Validation Agent completed. AI verified {tp_crit} Critical / {tp_high} High as True Positives, and flagged {fp_crit} Critical / {fp_high} High as False Positives.")
         else:
             add_log("Validation Agent completed. Dynamic AI verification skipped.")
         
         # Step 4: Report Agent
         scan_state["progress"] = 80
         add_log("Invoking Report Agent to compile findings and compute risk metrics...")
-        reporter = ReportAgent(target_url, scan_config, scan_results["findings"], validated_findings)
+        reporter = ReportAgent(target_url, scan_config, scan_results["findings"], validated_findings, scan_id=scan_results.get("scan_id"))
         report_data = reporter.run()
         add_log(f"Risk analysis complete. Calculated risk score: {report_data['risk_score']}/100 ({report_data['risk_desc']}).")
         
         # Step 5: PDF Generator
         scan_state["progress"] = 95
-        add_log("Invoking PDF Generator (Compiling Executive and Technical PDFs)...")
+        add_log(f"Invoking PDF Generator (Compiling Executive and Technical PDFs for scan: {scan_results.get('scan_id')})...")
         pdf_gen = PDFReportGenerator(report_data)
         exec_pdf, tech_pdf = pdf_gen.run()
-        add_log("PDF reports successfully written to workspace.")
-        
+        add_log(f"PDF reports successfully written to workspace: {exec_pdf} and {tech_pdf}")
+
         # Done
         with scan_lock:
             scan_state["progress"] = 100
             scan_state["status"] = "completed"
             scan_state["results"] = report_data
+            # Record the actual (scan-id suffixed) PDF paths so /download serves the
+            # right files — the generator names them Executive_Report_<scan_id>.pdf.
+            scan_state["exec_pdf"] = exec_pdf
+            scan_state["tech_pdf"] = tech_pdf
         add_log("AI DAST security pipeline completed successfully. Ready for download.")
             
     except Exception as e:
@@ -525,6 +537,7 @@ DASHBOARD_HTML = """
         .risk-badge.high { background-color: var(--high-bg); color: var(--high); border: 1px solid rgba(249, 115, 22, 0.3); }
         .risk-badge.medium { background-color: var(--medium-bg); color: var(--medium); border: 1px solid rgba(234, 179, 8, 0.3); }
         .risk-badge.low { background-color: var(--low-bg); color: var(--low); border: 1px solid rgba(59, 130, 246, 0.3); }
+        .risk-badge.minimal { background-color: var(--info-bg); color: var(--info); border: 1px solid rgba(100, 116, 139, 0.3); }
 
         .summary-description {
             font-size: 0.95rem;
@@ -1123,6 +1136,20 @@ DASHBOARD_HTML = """
         let scanResultsData = null;
         let pollInterval = null;
 
+        // Escape ALL scan-derived text before injecting via innerHTML. ZAP evidence and
+        // HTTP response bodies routinely contain raw HTML (e.g. <script>, </div>); injecting
+        // it unescaped corrupts the page DOM (the dashboard's background/layout vanished when
+        // opening "All Raw Findings") and is an XSS vector. Renders such content as literal text.
+        function escapeHtml(s) {
+            if (s === null || s === undefined) return '';
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
         function startScan() {
             const urlInput = document.getElementById('target-url').value;
             const apiKeyInput = document.getElementById('api-key').value;
@@ -1168,7 +1195,7 @@ DASHBOARD_HTML = """
                 const terminal = document.getElementById('log-terminal');
                 const wasScrolledDown = terminal.scrollHeight - terminal.clientHeight <= terminal.scrollTop + 10;
                 
-                terminal.innerHTML = state.logs.map(log => `<div class="terminal-line">${log}</div>`).join('');
+                terminal.innerHTML = state.logs.map(log => `<div class="terminal-line">${escapeHtml(log)}</div>`).join('');
                 if (wasScrolledDown) {
                     terminal.scrollTop = terminal.scrollHeight;
                 }
@@ -1218,8 +1245,9 @@ DASHBOARD_HTML = """
             circle.style.strokeDashoffset = offset;
             
             let circleColor = "var(--low)";
-            if (score >= 70) circleColor = "var(--critical)";
-            else if (score >= 30) circleColor = "var(--high)";
+            if (score >= 80) circleColor = "var(--critical)";
+            else if (score >= 55) circleColor = "var(--high)";
+            else if (score >= 30) circleColor = "var(--medium)";
             circle.style.stroke = circleColor;
 
             const badge = document.getElementById('risk-badge');
@@ -1237,7 +1265,7 @@ DASHBOARD_HTML = """
             document.getElementById('stat-info').innerText = scanResultsData.stats.informational;
 
             const fwContainer = document.getElementById('frameworks-container');
-            fwContainer.innerHTML = scanResultsData.frameworks.map(fw => `<span class="framework-badge">${fw}</span>`).join('');
+            fwContainer.innerHTML = scanResultsData.frameworks.map(fw => `<span class="framework-badge">${escapeHtml(fw)}</span>`).join('');
 
             renderReconResults();
             renderFindingsList();
@@ -1263,7 +1291,7 @@ DASHBOARD_HTML = """
             const fws = scanResultsData.frameworks || [];
             document.getElementById('recon-tech').innerText = fws.length;
             document.getElementById('recon-frameworks').innerHTML = fws.length
-                ? fws.map(fw => `<span class="framework-badge">${fw}</span>`).join('')
+                ? fws.map(fw => `<span class="framework-badge">${escapeHtml(fw)}</span>`).join('')
                 : '<span style="color:var(--text-muted);">None detected</span>';
 
             const pages = scanResultsData.pages_crawled || [];
@@ -1287,9 +1315,9 @@ DASHBOARD_HTML = """
 
             let list = [];
             if (currentTab === 'validated') {
-                list = scanResultsData.findings.filter(f => f.risk.toLowerCase() === 'critical' || f.risk.toLowerCase() === 'high');
+                list = scanResultsData.findings.filter(f => (f.risk.toLowerCase() === 'critical' || f.risk.toLowerCase() === 'high') && !f.is_duplicate);
             } else {
-                list = scanResultsData.findings;
+                list = scanResultsData.findings.filter(f => !f.is_duplicate);
             }
 
             if (list.length === 0) {
@@ -1329,7 +1357,7 @@ DASHBOARD_HTML = """
                                     <span>▼</span>
                                 </div>
                                 <div class="payload-body">
-                                    <div class="code-box">${finding.request_header}\n\n${finding.request_body || ''}</div>
+                                    <div class="code-box">${escapeHtml(finding.request_header)}\n\n${escapeHtml(finding.request_body || '')}</div>
                                 </div>
                             </div>
                             ` : ''}
@@ -1341,7 +1369,7 @@ DASHBOARD_HTML = """
                                     <span>▼</span>
                                 </div>
                                 <div class="payload-body">
-                                    <div class="code-box">${finding.response_header}\n\n${finding.response_body || ''}</div>
+                                    <div class="code-box">${escapeHtml(finding.response_header)}\n\n${escapeHtml(finding.response_body || '')}</div>
                                 </div>
                             </div>
                             ` : ''}
@@ -1349,11 +1377,15 @@ DASHBOARD_HTML = """
                     `;
                 }
 
+                // Title prefix for False Positives
+                const isFp = scanResultsData.ai_used && finding.is_false_positive;
+                const titlePrefix = isFp ? '<span style="color:var(--text-muted);">[FALSE POSITIVE]</span> ' : '';
+
                 item.innerHTML = `
                     <div class="finding-top" onclick="this.parentElement.classList.toggle('open')">
                         <div class="finding-meta">
-                            <span class="severity-badge ${isFpClass}">${sevName}</span>
-                            <span class="finding-title">${finding.alert}</span>
+                            <span class="severity-badge ${isFpClass}">${escapeHtml(sevName)}</span>
+                            <span class="finding-title">${titlePrefix}${escapeHtml(finding.alert)}</span>
                             ${aiBadgeHTML}
                         </div>
                         <div class="finding-arrow">▼</div>
@@ -1361,24 +1393,54 @@ DASHBOARD_HTML = """
                     <div class="finding-bottom">
                         <div class="detail-row">
                             <div class="detail-label">Vulnerable Endpoint / Parameter</div>
-                            <div class="detail-val"><code>${finding.url}</code> ${finding.parameter ? `(Parameter: <code>${finding.parameter}</code>)` : ''}</div>
+                            <div class="detail-val">
+                                ${finding.affected_urls && finding.affected_urls.length > 1 ? `
+                                    <ul style="margin: 0; padding-left: 1.2rem;">
+                                        ${finding.affected_urls.map(u => `<li><code>${escapeHtml(u)}</code></li>`).join('')}
+                                    </ul>
+                                ` : `
+                                    <code>${escapeHtml(finding.url)}</code>
+                                `}
+                                ${finding.parameter ? `(Parameter: <code>${escapeHtml(finding.parameter)}</code>)` : ''}
+                            </div>
                         </div>
-                        
+
+                        ${finding.cwe_full ? `
+                        <div class="detail-row">
+                            <div class="detail-label">CWE Classification</div>
+                            <div class="detail-val">${escapeHtml(finding.cwe_full)}</div>
+                        </div>
+                        ` : ''}
+
+                        ${finding.owasp_full ? `
+                        <div class="detail-row">
+                            <div class="detail-label">OWASP Top 10 Category</div>
+                            <div class="detail-val">${escapeHtml(finding.owasp_full)}</div>
+                        </div>
+                        ` : ''}
+
+                        ${finding.cve_full && finding.cve_full !== 'N/A' ? `
+                        <div class="detail-row">
+                            <div class="detail-label">CVE Reference</div>
+                            <div class="detail-val">${escapeHtml(finding.cve_full)}</div>
+                        </div>
+                        ` : ''}
+
                         <div class="detail-row">
                             <div class="detail-label">Vulnerability Description</div>
-                            <div class="detail-val">${finding.description}</div>
+                            <div class="detail-val">${escapeHtml(finding.description)}</div>
                         </div>
 
                         ${finding.evidence ? `
                         <div class="detail-row">
                             <div class="detail-label">Scan Evidence</div>
-                            <div class="code-box">${finding.evidence}</div>
+                            <div class="code-box">${escapeHtml(finding.evidence)}</div>
                         </div>
                         ` : ''}
 
                         <div class="detail-row">
                             <div class="detail-label">Remediation Action</div>
-                            <div class="detail-val">${finding.solution}</div>
+                            <div class="detail-val">${escapeHtml(finding.solution)}</div>
                         </div>
 
                         ${httpAuditsHTML}
@@ -1392,7 +1454,7 @@ DASHBOARD_HTML = """
                                 </span>
                             </div>
                             <div class="detail-val" style="font-style: italic; color: #E2E8F0;">
-                                "${finding.ai_reasoning}"
+                                "${escapeHtml(finding.ai_reasoning)}"
                             </div>
                         </div>
                         ` : ''}
@@ -1446,15 +1508,13 @@ def status():
 
 @app.route("/download/<report_type>")
 def download(report_type):
-    if report_type == "executive":
-        filepath = "Executive_Report.pdf"
-        filename = "Executive_Report.pdf"
-    else:
-        filepath = "Technical_VA_Report.pdf"
-        filename = "Technical_VA_Report.pdf"
+    with scan_lock:
+        filepath = scan_state.get("exec_pdf") if report_type == "executive" else scan_state.get("tech_pdf")
 
-    if os.path.exists(filepath):
-        return send_file(filepath, as_attachment=True, download_name=filename)
+    if filepath and os.path.exists(filepath):
+        # Serve under a clean, stable download name regardless of the scan-id suffix.
+        download_name = "Executive_Report.pdf" if report_type == "executive" else "Technical_VA_Report.pdf"
+        return send_file(filepath, as_attachment=True, download_name=download_name)
     else:
         return "Report file not found. Run a scan first.", 404
 

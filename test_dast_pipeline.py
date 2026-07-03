@@ -206,8 +206,8 @@ class TestDASTPipeline(unittest.TestCase):
         self.assertTrue(os.path.exists(tech_pdf))
 
         # Cleanup
-        for path in [exec_pdf, tech_pdf, "executive_report.json",
-                     "technical_va_report.json", "findings_severity_chart.png"]:
+        for path in [exec_pdf, tech_pdf, f"executive_report_{report_data.get('scan_id')}.json",
+                     f"technical_va_report_{report_data.get('scan_id')}.json", "findings_severity_chart.png"]:
             if os.path.exists(path):
                 os.remove(path)
 
@@ -236,7 +236,97 @@ class TestDASTPipeline(unittest.TestCase):
             generate_pdf_report(report, out, is_executive=False)  # must not raise
             self.assertTrue(os.path.exists(out))
         finally:
-            for path in [out, "executive_report.json", "technical_va_report.json",
+            scan_id = report.get("scan_id", "latest")
+            for path in [out, f"executive_report_{scan_id}.json", f"technical_va_report_{scan_id}.json",
+                         "findings_severity_chart.png"]:
+                if os.path.exists(path):
+                    os.remove(path)
+
+    def test_pdf_handles_oversized_text_fields(self):
+        """
+        A finding whose Description / Remediation / AI-reasoning text is taller than a page
+        must not crash PDF generation. Regression for the LayoutError on a 'Remediation:'
+        table cell that exceeded the frame height — the oversized-HTTP test did not exercise
+        these plain-text detail rows, so this pins the split-across-pages fix for them.
+        """
+        print("\n[TEST] Verifying PDF survives oversized text detail fields...")
+        from pdf_generator import generate_pdf_report
+
+        huge = "This remediation and description text is intentionally enormous. " * 300
+        raw = [{
+            "id": "big-text", "alert": "SQL Injection", "risk": "High", "confidence": "High",
+            "url": "http://t/x", "parameter": "q", "description": huge, "solution": huge,
+            "evidence": "err", "wascid": "19", "cweid": "89",
+            "request_header": "", "request_body": "", "response_header": "", "response_body": "", "other": "",
+        }]
+        # AI-enriched so the (also oversized) AI reasoning row is exercised too.
+        validated = [{
+            "id": "big-text", "is_false_positive": False, "confidence": 0.9,
+            "reasoning": huge, "solution": huge, "is_duplicate": False, "duplicate_of_id": None,
+        }]
+        report = ReportAgent("http://t/", SAMPLE_SCAN_CONFIG, raw, validated).run()
+
+        out_e, out_t = "regression_text_exec.pdf", "regression_text_tech.pdf"
+        try:
+            generate_pdf_report(report, out_e, is_executive=True)   # must not raise
+            generate_pdf_report(report, out_t, is_executive=False)  # must not raise
+            self.assertTrue(os.path.exists(out_e) and os.path.exists(out_t))
+        finally:
+            scan_id = report.get("scan_id", "latest")
+            for path in [out_e, out_t, f"executive_report_{scan_id}.json",
+                         f"technical_va_report_{scan_id}.json", "findings_severity_chart.png"]:
+                if os.path.exists(path):
+                    os.remove(path)
+
+    def test_risk_score_anchored_to_worst_severity(self):
+        """
+        The risk score must anchor to the worst active severity, not sum additively to a
+        false 100/CRITICAL. Many High findings should read HIGH (well under 100); Medium-only
+        should read MEDIUM. Regression for the '100/100 CRITICAL' complaint.
+        """
+        print("\n[TEST] Verifying risk score is severity-anchored...")
+        highs = [{"id": str(i), "alert": f"High {i}", "risk": "High", "url": f"http://t/{i}"} for i in range(8)]
+        r_high = ReportAgent("http://t/", {"frameworks": [], "pages_to_scan": []}, highs, []).run()
+        self.assertEqual(r_high["risk_desc"], "HIGH RISK PROFILE")
+        self.assertLess(r_high["risk_score"], 85, "8 High findings must not saturate to a CRITICAL/near-100 score")
+
+        meds = [{"id": str(i), "alert": f"Med {i}", "risk": "Medium", "url": f"http://t/{i}"} for i in range(15)]
+        r_med = ReportAgent("http://t/", {"frameworks": [], "pages_to_scan": []}, meds, []).run()
+        self.assertEqual(r_med["risk_desc"], "MEDIUM RISK PROFILE")
+        self.assertLess(r_med["risk_score"], r_high["risk_score"])
+
+        for scan_id in (r_high.get("scan_id", "latest"), r_med.get("scan_id", "latest")):
+            for path in [f"executive_report_{scan_id}.json", f"technical_va_report_{scan_id}.json",
+                         "findings_severity_chart.png"]:
+                if os.path.exists(path):
+                    os.remove(path)
+
+    def test_pdf_handles_many_affected_urls(self):
+        """
+        A finding with a large list of affected URLs must not crash PDF generation.
+        Regression for LayoutError when the table cell exceeds page height.
+        """
+        print("\n[TEST] Verifying PDF survives large list of affected URLs...")
+        from pdf_generator import generate_pdf_report
+
+        findings = []
+        for i in range(200):
+            findings.append({
+                "id": f"f-{i}", "alert": "Missing CSP Header", "risk": "Medium",
+                "url": f"http://t/path/{i}", "parameter": "", "description": "d", "solution": "s",
+                "request_header": "", "request_body": "",
+                "response_header": "", "response_body": "", "other": "",
+            })
+            
+        report = ReportAgent("http://t/", SAMPLE_SCAN_CONFIG, findings, []).run()
+
+        out = "regression_urls_tech.pdf"
+        try:
+            generate_pdf_report(report, out, is_executive=False)  # must not raise
+            self.assertTrue(os.path.exists(out))
+        finally:
+            scan_id = report.get("scan_id", "latest")
+            for path in [out, f"executive_report_{scan_id}.json", f"technical_va_report_{scan_id}.json",
                          "findings_severity_chart.png"]:
                 if os.path.exists(path):
                     os.remove(path)
@@ -247,8 +337,9 @@ class TestDASTPipeline(unittest.TestCase):
         passive_config = dict(SAMPLE_SCAN_CONFIG, active_scan=False)
         report = ReportAgent(self.target_url, passive_config, list(SAMPLE_FINDINGS), []).run()
         self.assertFalse(report["active_scan"])
-        for path in ["Executive_Report.pdf", "Technical_VA_Report.pdf", "executive_report.json",
-                     "technical_va_report.json", "findings_severity_chart.png"]:
+        scan_id = report.get("scan_id", "latest")
+        for path in [f"Executive_Report_{scan_id}.pdf", f"Technical_VA_Report_{scan_id}.pdf", f"executive_report_{scan_id}.json",
+                     f"technical_va_report_{scan_id}.json", "findings_severity_chart.png"]:
             if os.path.exists(path):
                 os.remove(path)
 

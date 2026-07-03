@@ -14,7 +14,9 @@ Thumbs.db
 # Dynamic scan data caches and local reports
 scan_results_*.json
 executive_report.json
+executive_report_*.json
 technical_va_report.json
+technical_va_report_*.json
 findings_severity_chart.png
 *.pdf
 

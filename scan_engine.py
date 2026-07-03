@@ -263,44 +263,92 @@ class DASTScanEngine:
         self.ensure_zap_running()
         return self._run_real_zap_scan(use_ajax_spider, active_scan=active_scan)
 
+    def _configure_zap_options(self, active_scan=True):
+        """
+        Best-effort tuning of ZAP scan options to surface more findings while keeping the
+        wall-clock bounded. Every call is defensive: option endpoints vary across ZAP
+        versions, and a missing one must never abort a scan.
+
+        Levers:
+          - Spider crawls deeper/wider (more URLs -> more passive + active coverage) but
+            is time-capped so it can't run away on large sites.
+          - Active scanner gets more parallelism and a hard duration cap.
+          - Alert threshold is lowered to LOW so lower-confidence (but real) issues are
+            reported instead of silently dropped — the main reason runs came back "empty".
+        """
+        options = [
+            ("spider/action/setOptionMaxDepth", {"Integer": 7}),
+            ("spider/action/setOptionThreadCount", {"Integer": 5}),
+            ("spider/action/setOptionMaxDuration", {"Integer": 5}),        # minutes (0 = unlimited)
+            ("ajaxSpider/action/setOptionMaxDuration", {"Integer": 5}),    # minutes
+            ("ascan/action/setOptionThreadPerHost", {"Integer": 5}),
+            ("ascan/action/setOptionHostPerScan", {"Integer": 2}),
+            ("ascan/action/setOptionMaxScanDurationInMins", {"Integer": 10}),
+            ("ascan/action/setOptionMaxRuleDurationInMins", {"Integer": 3}),
+        ]
+        for path, params in options:
+            try:
+                requests.get(f"{self.zap_url}/JSON/{path}/",
+                             params={**params, "apikey": self.zap_api_key}, timeout=10)
+            except Exception as e:
+                logger.debug(f"[ZAP Scan] Option {path} not applied: {e}")
+
+        # Lower the alert threshold to LOW across every active-scan policy category so the
+        # scanner reports more (real, lower-confidence) findings rather than only High ones.
+        if active_scan:
+            try:
+                cats = requests.get(f"{self.zap_url}/JSON/ascan/view/policies/",
+                                    params={"apikey": self.zap_api_key}, timeout=10).json().get("policies", [])
+                for cat in cats:
+                    pid = cat.get("id")
+                    if pid is None:
+                        continue
+                    requests.get(f"{self.zap_url}/JSON/ascan/action/setPolicyAlertThreshold/",
+                                 params={"id": pid, "alertThreshold": "LOW", "apikey": self.zap_api_key}, timeout=10)
+                logger.info("[ZAP Scan] Active-scan alert threshold lowered to LOW for broader coverage.")
+            except Exception as e:
+                logger.debug(f"[ZAP Scan] Policy threshold tuning skipped: {e}")
+
     def _run_real_zap_scan(self, use_ajax_spider, active_scan=True):
         """Orchestrates actual OWASP ZAP spidering and vulnerability alert fetching."""
         apikey_param = {"apikey": self.zap_api_key}
+        self._configure_zap_options(active_scan=active_scan)
         
-        # 1. Select Spider based on framework
+        # 1. Spidering. ALWAYS run the fast standard spider to discover URLs. For SPAs
+        #    (or when explicitly requested) ALSO run the AJAX spider, which drives a real
+        #    browser to reach JS-rendered routes the standard spider cannot see. Running
+        #    both widens the crawl, so more requests flow through the passive/active
+        #    scanners — directly addressing "too few findings". Both are time-capped via
+        #    _configure_zap_options so this never becomes an unbounded wait.
         is_spa = any(x in self.frameworks_detected for x in ["Frontend: React", "Frontend: Next.js", "Frontend: Angular", "Frontend: Vue.js"])
-        
+
+        logger.info("[ZAP Scan] Launching ZAP Standard Spider...")
+        spider_res = requests.get(
+            f"{self.zap_url}/JSON/spider/action/scan/",
+            params={"url": self.target_url, "recurse": "true", **apikey_param}
+        ).json()
+        spider_id = spider_res.get("scan")
+        spider_status_url = f"{self.zap_url}/JSON/spider/view/status/"
+        while True:
+            status = requests.get(spider_status_url, params={"scanId": spider_id, **apikey_param}).json().get("status", "100")
+            logger.info(f"[ZAP Scan] Standard Spider progress: {status}%")
+            if int(status) >= 100:
+                break
+            time.sleep(2)
+
         if is_spa or use_ajax_spider:
-            logger.info("[ZAP Scan] SPA detected. Launching ZAP AJAX Spider...")
-            start_url = f"{self.zap_url}/JSON/ajaxSpider/action/scan/"
-            params = {"url": self.target_url, "inScope": "true", **apikey_param}
-            requests.get(start_url, params=params)
-            
-            # Poll AJAX Spider
-            status_url = f"{self.zap_url}/JSON/ajaxSpider/view/status/"
+            logger.info("[ZAP Scan] SPA detected — additionally running ZAP AJAX Spider for JS-rendered routes...")
+            requests.get(
+                f"{self.zap_url}/JSON/ajaxSpider/action/scan/",
+                params={"url": self.target_url, "inScope": "false", **apikey_param}
+            )
+            ajax_status_url = f"{self.zap_url}/JSON/ajaxSpider/view/status/"
             while True:
-                status_res = requests.get(status_url, params=apikey_param).json()
-                status = status_res.get("status")
-                logger.info(f"[ZAP Scan] AJAX Spider Status: {status}")
+                status = requests.get(ajax_status_url, params=apikey_param).json().get("status")
+                logger.info(f"[ZAP Scan] AJAX Spider status: {status}")
                 if status == "stopped":
                     break
                 time.sleep(3)
-        else:
-            logger.info("[ZAP Scan] Standard application detected. Launching ZAP Standard Spider...")
-            start_url = f"{self.zap_url}/JSON/spider/action/scan/"
-            params = {"url": self.target_url, "maxChildren": 10, **apikey_param}
-            scan_res = requests.get(start_url, params=params).json()
-            scan_id = scan_res.get("scan")
-            
-            # Poll Standard Spider
-            status_url = f"{self.zap_url}/JSON/spider/view/status/"
-            while True:
-                status_res = requests.get(status_url, params={"scanId": scan_id, **apikey_param}).json()
-                status = status_res.get("status")
-                logger.info(f"[ZAP Scan] ZAP Standard Spider Progress: {status}%")
-                if int(status) >= 100:
-                    break
-                time.sleep(2)
 
         # 2. Start ZAP Active Scan (optional — intrusive attack payloads)
         if active_scan:
@@ -367,8 +415,8 @@ class DASTScanEngine:
                 "description": alert.get("description", ""),
                 "solution": alert.get("solution", ""),
                 "evidence": alert.get("evidence", ""),
-                "wascid": alert.get("wascId", ""),
-                "cweid": alert.get("cweId", ""),
+                "wascid": alert.get("wascid", ""),
+                "cweid": alert.get("cweid", ""),
                 "request_header": req_header,
                 "request_body": req_body,
                 "response_header": res_header,
@@ -388,8 +436,10 @@ class DASTScanEngine:
             "findings": findings
         }
 
-        with open(f"scan_results_{self.scan_id}.json", "w") as f:
+        filename = f"scan_results_{self.scan_id}.json"
+        with open(filename, "w") as f:
             json.dump(scan_results, f, indent=4)
+        logger.info(f"[Scan Engine] Saved raw scan results to: {filename}")
             
         return scan_results
 

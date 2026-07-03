@@ -368,19 +368,18 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
 
     # ==================== PAGE 3+: FINDINGS DETAILS ====================
     findings = report_data.get("findings", [])
-    
     info_findings = []
     if is_executive:
-        # Executive report only displays active High/Critical validated findings
-        display_findings = [f for f in findings if str(f.get("risk", "")).lower() in ["critical", "high"] and not f.get("is_false_positive", False)]
+        # Include all High/Critical findings (skipping duplicate URL instances to avoid redundancy).
+        display_findings = [f for f in findings if str(f.get("risk", "")).lower() in ["critical", "high"] and not f.get("is_duplicate", False)]
         story.append(Paragraph("High & Critical Vulnerabilities Summary", h1_style))
         if not display_findings:
-            story.append(Paragraph("No High or Critical vulnerabilities are currently verified as active.", body_style))
+            story.append(Paragraph("No High or Critical vulnerabilities were identified.", body_style))
     else:
         # Technical report details actionable findings individually, but collapses
         # the (often huge) volume of Informational passive findings into a summary
         # table so the PDF stays a manageable size.
-        display_findings = [f for f in findings if "info" not in str(f.get("risk", "")).lower()]
+        display_findings = [f for f in findings if "info" not in str(f.get("risk", "")).lower() and not f.get("is_duplicate", False)]
         info_findings = [f for f in findings if "info" in str(f.get("risk", "")).lower()]
         story.append(Paragraph("Detailed Security Findings List", h1_style))
         if not display_findings:
@@ -410,10 +409,16 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
 
     for idx, finding in enumerate(display_findings, 1):
         severity = finding.get("risk", "Low")
-        sev_color = get_severity_color(severity)
+        is_fp = finding.get("is_false_positive", False)
         
         # Header block for the finding
-        header_text = f"{idx}. [{esc(severity).upper()}] {esc(finding.get('alert', 'Vulnerability'))}"
+        if is_fp:
+            sev_color = colors.HexColor("#718096")  # Neutral Slate Gray for False Positives
+            header_text = f"{idx}. [FALSE POSITIVE] {esc(finding.get('alert', 'Vulnerability'))}"
+        else:
+            sev_color = get_severity_color(severity)
+            header_text = f"{idx}. [{esc(severity).upper()}] {esc(finding.get('alert', 'Vulnerability'))}"
+            
         title_p = Paragraph(header_text, finding_title_style)
         
         header_table = Table([[title_p]], colWidths=[504])
@@ -426,13 +431,30 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
 
         # Finding details rows
         detail_rows = []
-        detail_rows.append([Paragraph("<b>URL:</b>", meta_label_style), Paragraph(esc(finding.get("url", "N/A")), meta_val_style)])
+        affected = finding.get("affected_urls", [finding.get("url", "N/A")])
+        if len(affected) > 1:
+            max_pdf_urls = 15
+            display_urls = affected[:max_pdf_urls]
+            urls_escaped = "<br/>".join(f"• {esc(u)}" for u in display_urls)
+            if len(affected) > max_pdf_urls:
+                urls_escaped += f"<br/><i>... and {len(affected) - max_pdf_urls} more affected endpoints (refer to JSON report or Web Dashboard for full list)</i>"
+            detail_rows.append([Paragraph("<b>Affected URLs:</b>", meta_label_style), Paragraph(urls_escaped, meta_val_style)])
+        else:
+            detail_rows.append([Paragraph("<b>URL:</b>", meta_label_style), Paragraph(esc(finding.get("url", "N/A")), meta_val_style)])
 
         if finding.get("parameter"):
             detail_rows.append([Paragraph("<b>Parameter:</b>", meta_label_style), Paragraph(esc(finding.get("parameter", "")), meta_val_style)])
 
         detail_rows.append([Paragraph("<b>Description:</b>", meta_label_style), Paragraph(esc(finding.get("description", "")), meta_val_style)])
         detail_rows.append([Paragraph("<b>Remediation:</b>", meta_label_style), Paragraph(esc(finding.get("solution", "")), meta_val_style)])
+
+        # Vulnerability mappings (CVE, CWE, OWASP Top 10)
+        if finding.get("cwe_full"):
+            detail_rows.append([Paragraph("<b>CWE Mapping:</b>", meta_label_style), Paragraph(esc(finding.get("cwe_full")), meta_val_style)])
+        if finding.get("owasp_full"):
+            detail_rows.append([Paragraph("<b>OWASP Top 10:</b>", meta_label_style), Paragraph(esc(finding.get("owasp_full")), meta_val_style)])
+        if finding.get("cve_full") and finding.get("cve_full") != "N/A":
+            detail_rows.append([Paragraph("<b>CVE Reference:</b>", meta_label_style), Paragraph(esc(finding.get("cve_full")), meta_val_style)])
 
         if finding.get("evidence"):
             detail_rows.append([Paragraph("<b>Evidence:</b>", meta_label_style), Paragraph(f"<font face='Courier' size='8'>{esc(cap(finding.get('evidence', '')))}</font>", meta_val_style)])
@@ -442,15 +464,15 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
             conf_color = "#38A169" if float(finding.get("ai_confidence", 0.0)) >= 0.7 else "#DD6B20"
             conf_str = f"<font color='{conf_color}'><b>{int(finding.get('ai_confidence', 0.0)*100)}%</b></font>"
             if finding.get("is_false_positive"):
-                conf_str += " (Probable False Positive)"
+                conf_str += " (AI Flagged: PROBABLE FALSE POSITIVE)"
             else:
-                conf_str += " (Verified True Positive)"
+                conf_str += " (AI Verified: TRUE POSITIVE)"
             detail_rows.append([Paragraph("<b>AI Verification:</b>", meta_label_style), Paragraph(conf_str, meta_val_style)])
             
             if finding.get("ai_reasoning"):
-                detail_rows.append([Paragraph("<b>AI Analysis:</b>", meta_label_style), Paragraph(esc(finding.get("ai_reasoning", "")), meta_val_style)])
+                detail_rows.append([Paragraph("<b>AI Validation Justification:</b>", meta_label_style), Paragraph(esc(finding.get("ai_reasoning", "")), meta_val_style)])
 
-        if not is_executive:
+        if not is_executive and not finding.get("cwe_full"):
             meta_links = []
             if finding.get("cweid"):
                 meta_links.append(f"CWE-{finding.get('cweid')}")
@@ -459,7 +481,11 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
             if meta_links:
                 detail_rows.append([Paragraph("<b>Reference:</b>", meta_label_style), Paragraph(", ".join(meta_links), meta_val_style)])
 
-        details_table = Table(detail_rows, colWidths=[100, 404])
+        # splitInRow=1 lets a single tall cell (a long Description/Remediation/AI
+        # justification) break across pages. Without it, any finding whose text
+        # exceeds one page height raises a reportlab LayoutError, because a table
+        # row is otherwise indivisible.
+        details_table = Table(detail_rows, colWidths=[100, 404], splitInRow=1)
         details_table.setStyle(TableStyle([
             ('ALIGN', (0,0), (-1,-1), 'LEFT'),
             ('VALIGN', (0,0), (-1,-1), 'TOP'),
@@ -493,9 +519,13 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
                 http_flowables.append(Paragraph("<b>HTTP Response:</b>", meta_label_style))
                 http_flowables.append(Paragraph(res_text, code_style))
 
-        # Keep the header with its (bounded) details table so a finding never starts with an
-        # orphaned header at the bottom of a page. The HTTP payloads flow (and split) after it.
-        story.append(KeepTogether([header_table, details_table]))
+        # Glue the coloured header to the details table via keepWithNext (so the header is
+        # never orphaned at a page bottom) WITHOUT forcing the whole finding onto one page —
+        # the details table splits across pages on its own via splitInRow. Wrapping both in
+        # KeepTogether would defeat that split and reintroduce the LayoutError on long findings.
+        header_table.keepWithNext = 1
+        story.append(header_table)
+        story.append(details_table)
         for fl in http_flowables:
             story.append(fl)
         story.append(Spacer(1, 15))

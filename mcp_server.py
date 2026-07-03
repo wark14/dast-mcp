@@ -97,10 +97,13 @@ def run_zap_scan(url: str, active_scan: bool = True) -> str:
     scan_results = engine.run_dast_scan(active_scan=active_scan)
     scan_id = scan_results["scan_id"]
     SCANS_DB[scan_id] = scan_results
+    filename = f"scan_results_{scan_id}.json"
+    logger.info(f"DAST scan completed successfully. Results saved to {filename}")
     return json.dumps({
         "message": "DAST scan completed successfully.",
         "scan_id": scan_id,
-        "findings_count": len(scan_results["findings"])
+        "findings_count": len(scan_results["findings"]),
+        "results_file": filename
     }, indent=2)
 
 @mcp.tool()
@@ -191,7 +194,8 @@ def generate_report(data_json: str) -> str:
         target_url=data.get("target_url"),
         scan_config=data.get("scan_config", {}),
         raw_findings=data.get("raw_findings", []),
-        validated_findings=data.get("validated_findings", [])
+        validated_findings=data.get("validated_findings", []),
+        scan_id=data.get("scan_id") or data.get("scan_config", {}).get("scan_id")
     )
     report_data = reporter.run()
     return json.dumps(report_data, indent=2)
