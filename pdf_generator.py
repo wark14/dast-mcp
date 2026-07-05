@@ -343,6 +343,33 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
     story.append(Spacer(1, 20))
 
     if is_executive:
+        story.append(Spacer(1, 10))
+        story.append(Paragraph("Key Findings Summary", h2_style))
+        kpi_data = [
+            [
+                Paragraph("<b>Pages Crawled</b>", meta_label_style),
+                Paragraph("<b>Forms Discovered</b>", meta_label_style),
+                Paragraph("<b>AI Verified TPs</b>" if ai_used else "<b>Critical + High</b>", meta_label_style),
+                Paragraph("<b>AI Flagged FPs</b>" if ai_used else "<b>Medium + Low</b>", meta_label_style)
+            ],
+            [
+                Paragraph(str(report_data.get("pages_crawled_count", 0)), body_style),
+                Paragraph(str(report_data.get("forms_found_count", 0)), body_style),
+                Paragraph(str(stats.get("critical_validated", 0) + stats.get("high_validated", 0)) if ai_used else str(stats.get("critical", 0) + stats.get("high", 0)), body_style),
+                Paragraph(str(stats.get("critical", 0) - stats.get("critical_validated", 0) + stats.get("high", 0) - stats.get("high_validated", 0)) if ai_used else str(stats.get("medium", 0) + stats.get("low", 0)), body_style)
+            ]
+        ]
+        kpi_table = Table(kpi_data, colWidths=[126, 126, 126, 126])
+        kpi_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), light_bg),
+            ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+            ('TOPPADDING', (0,0), (-1,-1), 8),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#CBD5E0")),
+        ]))
+        story.append(kpi_table)
+        story.append(Spacer(1, 15))
+
         story.append(Paragraph("Business & Operational Impact", h2_style))
         business_impact = report_data.get("business_impact", "")
         story.append(Paragraph(esc(business_impact), body_style))
@@ -363,6 +390,39 @@ def generate_pdf_report(report_data, output_filepath, is_executive=True):
         story.append(Paragraph("<b>Detected Technologies:</b>", bold_body_style))
         for f in frameworks_list:
             story.append(Paragraph(f"• {esc(f)}", bullet_style))
+
+        # OWASP Top 10 Table for Technical Report
+        story.append(Spacer(1, 10))
+        story.append(Paragraph("OWASP Top 10 (2021) Category Mapping", h2_style))
+        
+        # Calculate OWASP categories from findings
+        owasp_map = {}
+        for f in report_data.get("findings", []):
+            if f.get("is_duplicate"):
+                continue
+            cat = f.get("owasp_full") or "Uncategorized"
+            if cat not in owasp_map:
+                owasp_map[cat] = 0
+            owasp_map[cat] += 1
+            
+        if owasp_map:
+            owasp_rows = [[Paragraph("<b>OWASP Category</b>", meta_label_style), Paragraph("<b>Active Findings</b>", meta_label_style)]]
+            for cat, count in sorted(owasp_map.items(), key=lambda x: x[1], reverse=True):
+                owasp_rows.append([Paragraph(esc(cat), body_style), Paragraph(str(count), body_style)])
+            owasp_table = Table(owasp_rows, colWidths=[380, 124])
+            owasp_table.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), light_bg),
+                ('ALIGN', (0,0), (0,-1), 'LEFT'),
+                ('ALIGN', (1,0), (1,-1), 'CENTER'),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+                ('TOPPADDING', (0,0), (-1,-1), 6),
+                ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor("#CBD5E0")),
+                ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, light_bg]),
+            ]))
+            story.append(owasp_table)
+        else:
+            story.append(Paragraph("No active findings mapped to OWASP categories.", body_style))
+        story.append(Spacer(1, 15))
 
     story.append(PageBreak())
 
