@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import math
 import requests
 import logging
 import re
@@ -9,6 +10,38 @@ from pdf_generator import generate_pdf_report
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Agents")
+
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+
+
+def call_gemini(api_key, prompt, temperature=0.2, timeout=(10, 120)):
+    """
+    Single-turn call to the Gemini generateContent API. Returns the model's raw
+    text response (a JSON string, since responseMimeType is application/json),
+    or None on any HTTP error, empty response, or timeout — callers parse the
+    text and fall back as needed.
+
+    The read timeout is deliberately generous: a reasoning model routinely needs
+    well over 30s, and too tight a budget silently drops the whole AI step.
+    """
+    headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": temperature, "responseMimeType": "application/json"},
+    }
+    try:
+        resp = requests.post(f"{GEMINI_URL}?key={api_key}", json=payload, headers=headers, timeout=timeout)
+        if resp.status_code != 200:
+            logger.error(f"[Gemini] API returned error code {resp.status_code}: {resp.text}")
+            return None
+        candidates = resp.json().get("candidates", [])
+        if not candidates:
+            logger.error("[Gemini] API returned no candidates.")
+            return None
+        return candidates[0]["content"]["parts"][0]["text"]
+    except Exception as e:
+        logger.error(f"[Gemini] Exception occurred during API call: {e}")
+        return None
 
 class ReconAgent:
     def __init__(self, target_url):
@@ -84,7 +117,32 @@ class ValidationAgent:
             if str(f.get("risk", "")).lower() in ["critical", "high"]
         ]
 
+    @staticmethod
+    def _compact_finding(f):
+        """
+        Project a finding down to just the fields relevant for false-positive
+        triage. Raw ZAP findings carry full HTTP request/response headers and
+        bodies, which bloat the LLM prompt — slowing the response enough to hit
+        the read timeout — without improving the verdict. Long strings are
+        truncated for the same reason.
+        """
+        def clip(value, limit):
+            s = str(value or "")
+            return s if len(s) <= limit else s[:limit] + "…"
+
+        return {
+            "id": f.get("id"),
+            "alert": f.get("alert"),
+            "risk": f.get("risk"),
+            "url": clip(f.get("url"), 300),
+            "parameter": f.get("parameter"),
+            "description": clip(f.get("description"), 600),
+            "evidence": clip(f.get("evidence"), 400),
+            "solution": clip(f.get("solution"), 400),
+        }
+
     def build_prompt(self, findings):
+        compact = [self._compact_finding(f) for f in findings]
         return (
             "Analyze the following High/Critical DAST vulnerability findings and determine "
             "whether each is likely a false positive. Assess exploitability, assign a confidence "
@@ -92,7 +150,7 @@ class ValidationAgent:
             "finding is marked as a False Positive, do not remove it. Set is_false_positive: true "
             "and detail your reasons in the reasoning field.\n\n"
             "Here is the list of findings in JSON format:\n"
-            f"{json.dumps(findings, indent=2)}\n\n"
+            f"{json.dumps(compact, indent=2)}\n\n"
             "Respond ONLY with a JSON array containing the validated results. Do not include "
             "markdown code block formatting (such as ```json). Each element MUST correspond to a "
             "finding ID from the input and use the following schema:\n"
@@ -162,42 +220,22 @@ class ValidationAgent:
         return self._validate_with_llm(high_crit)
 
     def _validate_with_llm(self, findings):
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
-        headers = {"Content-Type": "application/json", "x-goog-api-key": self.api_key}
-        payload = {
-            "contents": [{
-                "parts": [{"text": self.SYSTEM_PROMPT + "\n\n" + self.build_prompt(findings)}]
-            }],
-            "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
-        }
-
-        try:
-            response = requests.post(f"{url}?key={self.api_key}", json=payload, headers=headers, timeout=30)
-            if response.status_code == 200:
-                res_data = response.json()
-                candidates = res_data.get("candidates", [])
-                if not candidates:
-                    logger.error(f"[Validation Agent] Gemini API returned no candidates: {res_data}")
-                    return []
-                text_content = candidates[0]["content"]["parts"][0]["text"]
-                validated_list = self.parse_validation_response(text_content)
-                logger.info("[Validation Agent] Successfully validated findings via Gemini API.")
-                return validated_list
-            else:
-                logger.error(f"[Validation Agent] Gemini API returned error code {response.status_code}: {response.text}")
-        except Exception as e:
-            logger.error(f"[Validation Agent] Exception occurred during Gemini API validation: {e}")
-
-        return []
+        text_content = call_gemini(self.api_key, self.SYSTEM_PROMPT + "\n\n" + self.build_prompt(findings))
+        if text_content is None:
+            return []
+        validated_list = self.parse_validation_response(text_content)
+        logger.info("[Validation Agent] Successfully validated findings via Gemini API.")
+        return validated_list
 
 
 class ReportAgent:
-    def __init__(self, target_url, scan_config, raw_findings, validated_findings, scan_id=None):
+    def __init__(self, target_url, scan_config, raw_findings, validated_findings, scan_id=None, api_key=None):
         self.target_url = target_url
         self.scan_config = scan_config
         self.raw_findings = raw_findings
         self.validated_findings = validated_findings
         self.scan_id = scan_id or scan_config.get("scan_id") or "latest"
+        self.api_key = api_key or os.environ.get("GEMINI_API_KEY")
 
     def get_vuln_references(self, alert_title, cwe_id=None):
         """
@@ -260,12 +298,95 @@ class ReportAgent:
         m = re.search(r"CVE-\d{4}-\d{4,7}", haystack, re.I)
         return m.group(0).upper() if m else "N/A"
 
+    @staticmethod
+    def _parse_json_object(text):
+        """Parse a JSON object from an LLM response, tolerating code fences and
+        surrounding prose. Returns a dict, or None if nothing usable is found."""
+        if not text:
+            return None
+        text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+        text = re.sub(r"\s*```$", "", text).strip()
+        try:
+            data = json.loads(text)
+            return data if isinstance(data, dict) else None
+        except Exception:
+            start, end = text.find("{"), text.rfind("}")
+            if start != -1 and end > start:
+                try:
+                    data = json.loads(text[start:end + 1])
+                    return data if isinstance(data, dict) else None
+                except Exception:
+                    return None
+        return None
+
+    def _generate_ai_narrative(self, active_findings, risk_score, risk_desc):
+        """
+        Ask Gemini to write the executive prose (summary, business impact,
+        strategic recommendations) from the active findings. Returns a dict with
+        those three keys, or None on any failure — callers keep the rule-based
+        text as fallback. Only a compact projection is sent (no HTTP payloads),
+        including any AI validation reasoning already attached to the findings.
+        """
+        if not self.api_key:
+            return None
+
+        compact = [
+            {
+                "alert": f.get("alert"),
+                "risk": f.get("risk"),
+                "url": f.get("url"),
+                "ai_reasoning": f.get("ai_reasoning", ""),
+            }
+            for f in active_findings
+        ]
+        prompt = (
+            "You are a senior application security consultant writing the executive section "
+            "of a DAST (Dynamic Application Security Testing) report for business stakeholders. "
+            f"Target application: {self.target_url}. "
+            f"Overall risk: {risk_desc} (score {risk_score}/100). "
+            "Base your writing ONLY on the active findings below; do not invent vulnerabilities. "
+            "If the list is empty, state that no active vulnerabilities were identified.\n\n"
+            f"Active findings (JSON):\n{json.dumps(compact, indent=2)}\n\n"
+            "Respond ONLY with a JSON object (no markdown fences) using exactly this schema:\n"
+            "{\n"
+            '  "executive_summary": "2-4 sentence high-level summary for leadership, '
+            'mentioning the risk level and score",\n'
+            '  "business_impact": "2-4 sentences on concrete business and operational risk",\n'
+            '  "strategic_recommendations": ["3 to 6 specific, actionable remediation steps"]\n'
+            "}"
+        )
+        narrative = self._parse_json_object(call_gemini(self.api_key, prompt, temperature=0.3))
+        if not narrative:
+            return None
+
+        summary = narrative.get("executive_summary")
+        impact = narrative.get("business_impact")
+        recs = narrative.get("strategic_recommendations")
+        clean_recs = [str(r).strip() for r in recs if str(r).strip()] if isinstance(recs, list) else []
+
+        # Require all three sections to be usable; otherwise fall back entirely so
+        # the report never mixes AI prose with rule-based prose inconsistently.
+        if isinstance(summary, str) and summary.strip() and \
+           isinstance(impact, str) and impact.strip() and clean_recs:
+            return {
+                "executive_summary": summary.strip(),
+                "business_impact": impact.strip(),
+                "strategic_recommendations": clean_recs,
+            }
+        return None
+
     def run(self):
         logger.info("[Report Agent] Generating reports...")
         
-        # Create map of validated findings by ID
-        val_map = {vf["id"]: vf for vf in self.validated_findings}
-        ai_used = len(self.validated_findings) > 0
+        # Create map of validated findings by ID. Guard against malformed LLM
+        # output: only index dict elements that actually carry an "id", so a
+        # dropped/renamed field degrades to "no AI verdict" instead of crashing
+        # the whole report thread.
+        val_map = {
+            vf["id"]: vf for vf in self.validated_findings
+            if isinstance(vf, dict) and vf.get("id")
+        }
+        ai_used = len(val_map) > 0
         
         enriched_findings = []
         stats = {
@@ -302,18 +423,19 @@ class ReportAgent:
                 # Enrich with AI data if validated
                 if finding_id in val_map:
                     v_data = val_map[finding_id]
-                    rf["is_false_positive"] = v_data["is_false_positive"]
-                    rf["ai_confidence"] = v_data["confidence"]
-                    rf["ai_reasoning"] = v_data["reasoning"]
-                    rf["solution"] = v_data["solution"]
-                    
+                    rf["is_false_positive"] = v_data.get("is_false_positive", False)
+                    rf["ai_confidence"] = v_data.get("confidence", 0.0)
+                    rf["ai_reasoning"] = v_data.get("reasoning", "")
+                    # Keep ZAP's remediation if the model didn't supply one.
+                    rf["solution"] = v_data.get("solution") or rf.get("solution", "")
+
                     if severity == "critical":
                         stats["critical"] += 1
-                        if not v_data["is_false_positive"]:
+                        if not rf["is_false_positive"]:
                             stats["critical_validated"] += 1
                     elif severity == "high":
                         stats["high"] += 1
-                        if not v_data["is_false_positive"]:
+                        if not rf["is_false_positive"]:
                             stats["high_validated"] += 1
                 else:
                     # No AI data or AI not run
@@ -345,24 +467,45 @@ class ReportAgent:
                 # Populate local copy AI details to stay consistent
                 if finding_id in val_map:
                     v_data = val_map[finding_id]
-                    rf["is_false_positive"] = v_data["is_false_positive"]
-                    rf["ai_confidence"] = v_data["confidence"]
-                    rf["ai_reasoning"] = v_data["reasoning"]
-                    rf["solution"] = v_data["solution"]
+                    rf["is_false_positive"] = v_data.get("is_false_positive", False)
+                    rf["ai_confidence"] = v_data.get("confidence", 0.0)
+                    rf["ai_reasoning"] = v_data.get("reasoning", "")
+                    rf["solution"] = v_data.get("solution") or rf.get("solution", "")
                 else:
                     rf["is_false_positive"] = False
 
             enriched_findings.append(rf)
 
-        # Risk Score (0-100), ANCHORED to the worst active severity present, plus a
-        # small bounded bonus for volume. False positives and duplicates are excluded.
-        # Anchoring (instead of a naive additive sum) is what prevents a handful of
-        # Medium/High alerts from trivially saturating the score to 100/CRITICAL —
-        # a real DAST run of only High findings should read HIGH, not CRITICAL/100.
+        # Risk Score (0-100). Two-part, severity-driven model:
+        #   1. ANCHOR the base to the worst active severity present (any active
+        #      Critical reads CRITICAL, etc.). False positives and duplicates excluded.
+        #   2. Add a bounded bonus scaled by how many distinct ENDPOINTS are affected
+        #      at each severity. The same alert on 40 URLs is a far wider exposure than
+        #      on 1 URL and should score higher; duplicate findings are collapsed into
+        #      their parent's affected_urls, so this counts real URL coverage.
+        # The bonus is capped so endpoint breadth nudges the score WITHIN a band but
+        # never jumps it into a higher-severity band — a wide High exposure stays HIGH,
+        # it does not become CRITICAL.
         active_findings = [
             f for f in enriched_findings
             if not f.get("is_false_positive", False) and not f.get("is_duplicate", False)
         ]
+
+        def _endpoints_at(severity):
+            urls = set()
+            for f in active_findings:
+                if str(f.get("risk", "")).lower() == severity:
+                    for u in (f.get("affected_urls") or [f.get("url")]):
+                        if u:
+                            urls.add(u)
+            return len(urls)
+
+        # Distinct affected endpoints per severity (drives the volume bonus).
+        e_crit, e_high = _endpoints_at("critical"), _endpoints_at("high")
+        e_med,  e_low  = _endpoints_at("medium"),   _endpoints_at("low")
+
+        # Presence of any active finding per severity (drives the band anchor). Kept
+        # separate from endpoint counts so a finding with a missing URL still anchors.
         n_crit = sum(1 for f in active_findings if str(f.get("risk", "")).lower() == "critical")
         n_high = sum(1 for f in active_findings if str(f.get("risk", "")).lower() == "high")
         n_med  = sum(1 for f in active_findings if str(f.get("risk", "")).lower() == "medium")
@@ -379,9 +522,19 @@ class ReportAgent:
         else:
             base, risk_desc = 0, "MINIMAL RISK PROFILE"
 
-        # Volume bonus is capped at 14 so counts nudge the score within a band but
-        # never jump it into a higher-severity band on their own.
-        bonus = min(n_crit * 5 + n_high * 3 + n_med * 1 + n_low * 0.5, 14)
+        # Endpoint breadth uses a diminishing-returns (log2) curve per severity: each
+        # extra affected endpoint adds risk, but with shrinking marginal impact, so the
+        # score keeps responding across a wide range instead of saturating after a
+        # handful of endpoints. The weighted sum is capped at 14 so breadth moves the
+        # score within a band but never overflows into the next-higher severity band.
+        def _breadth(endpoints):
+            return math.log2(1 + endpoints)
+
+        bonus = min(
+            3.5 * _breadth(e_crit) + 2.5 * _breadth(e_high)
+            + 1.5 * _breadth(e_med) + 0.8 * _breadth(e_low),
+            14
+        )
         risk_score = int(min(base + bonus, 100))
 
         # Generate Summary text dynamically from counts
@@ -467,6 +620,21 @@ class ReportAgent:
                 "Ensure SSL/TLS configuration follows modern cipher suites and security standards."
             ]
 
+        # When a Gemini key is available, replace the rule-based executive prose
+        # with an AI-written narrative. The keyword-based text above is retained
+        # as the fallback if generation fails, times out, or returns nothing.
+        narrative_ai_used = False
+        if self.api_key:
+            narrative = self._generate_ai_narrative(active_findings, risk_score, risk_desc)
+            if narrative:
+                summary_text = narrative["executive_summary"]
+                business_impact = narrative["business_impact"]
+                recs = narrative["strategic_recommendations"]
+                narrative_ai_used = True
+                logger.info("[Report Agent] Executive narrative generated via Gemini API.")
+            else:
+                logger.info("[Report Agent] AI narrative unavailable; using rule-based executive text.")
+
         report_data = {
             "target_url": self.target_url,
             "scan_id": self.scan_id,
@@ -484,7 +652,8 @@ class ReportAgent:
             "strategic_recommendations": recs,
             "stats": stats,
             "findings": enriched_findings,
-            "ai_used": ai_used
+            "ai_used": ai_used,
+            "narrative_ai_used": narrative_ai_used
         }
 
         # Log final summary stats explicitly
